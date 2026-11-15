@@ -38,35 +38,44 @@ Pick exactly 5 categories (stops) for building a ${theme}. Each is an emoji plus
 
 Return ONLY JSON: {"name":"short deck name","emoji":"one emoji","cats":["...","...","...","...","..."]}`};
   }
-  if(body.type === "cat"){
-    const theme = clip(body.theme, 40), cat = clip(body.cat, 30);
-    if(!theme || !cat) return null;
-    return {max: 1800, text: `You are writing one stop of a deck for a family-friendly party game called Budget Build. Players build a "${theme}" with a limited budget. This stop is "${cat}".
+  // Each stop is split in two halves that run at the same time, so every call stays short:
+  //   part "main": the 10 ranked options plus the mystery outcomes
+  //   part "alts": 3 extra options for each of the 10 prices
+  if(body.type === "cat" || body.type === "homecat"){
+    const part = body.part === "alts" ? "alts" : "main";
+    let who, rules, stop;
+    if(body.type === "cat"){
+      const theme = clip(body.theme, 40), cat = clip(body.cat, 30);
+      if(!theme || !cat) return null;
+      who = `Players build a "${theme}" with a limited budget. This stop is "${cat}".`;
+      rules = `Every entry must be under 28 characters. Keep it funny and clean. Real brands, places, famous people and characters are welcome when they fit. Poke fun lightly, never cruel.`;
+      stop = "options";
+    } else {
+      const team = clip(body.team, 40), sport = body.sport, era = body.era, i = +body.pos;
+      const list = POSITIONS[sport] ? POSITIONS[sport].split(", ") : null;
+      if(!team || !list || !ERA_TEXT[era] || !(i >= 0 && i < list.length)) return null;
+      who = `Players draft a ${sport} lineup for the ${team}. This stop is the ${list[i]} position. Use only ${ERA_TEXT[era]}; every player must have really played for the ${team}. If unsure a current player is still on the roster, prefer players you are confident about.`;
+      rules = `Every entry must be under 28 characters. Keep it fun, never cruel.`;
+      stop = "real players at that position";
+    }
+    const intro = `You are writing part of a deck for a family-friendly party game called Budget Build. ${who}`;
+    if(part === "main") return {max: 900, text: `${intro}
 
 Give:
-${CAT_SHAPE}
+- "o": exactly 10 ${stop} ranked from BEST to WORST. Index 0 is the $10 pick (amazing), the middle ones are average, and the last few are funny, bad or terrible (index 9 is the $1 pick).
+- "g": 2 surprise GOOD mystery outcomes (fun jackpots)
+- "b": 2 surprise BAD mystery outcomes (funny disasters)
 
-${RULES}
+${rules}
 
-Return ONLY JSON: {"o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}`};
-  }
-  if(body.type === "homecat"){
-    const team = clip(body.team, 40), sport = body.sport, era = body.era, i = +body.pos;
-    const list = POSITIONS[sport] ? POSITIONS[sport].split(", ") : null;
-    if(!team || !list || !ERA_TEXT[era] || !(i >= 0 && i < list.length)) return null;
-    return {max: 1800, text: `You are writing one stop of a deck for a party game called Budget Build. Players draft a ${sport} lineup for the ${team} with a limited budget. This stop is the ${list[i]} position.
+Reply with ONLY this JSON and nothing else: {"o":[10 strings],"g":[2 strings],"b":[2 strings]}`};
+    return {max: 1400, text: `${intro}
 
-Use only ${ERA_TEXT[era]}. Every player must have really played for the ${team}.
+Give "a": exactly 10 lists, one per price from $10 (amazing) down to $1 (terrible), each with 3 different ${stop} of that quality. $10 is dreamy, $5-$6 is average, $1 is the funny worst. No repeats.
 
-Give:
-- "o": exactly 10 real players at that position, ranked from BEST (index 0, the $10 pick) to WORST (index 9, the $1 pick). Top picks are stars and fan favorites, the middle are solid players, the bottom can be famous busts or forgettable backups.
-- "a": exactly 10 lists, one per price in the same order as "o", each with 3 MORE real players from the team of about the same quality. No player may appear twice.
-- "g": 2 surprise GOOD mystery players (underrated gems or cult heroes from the team)
-- "b": 2 surprise BAD mystery outcomes (famous busts or funny disasters)
+${rules}
 
-Every entry must be under 28 characters. Keep it fun, never cruel. If unsure a current player is still on the roster, prefer players you are confident about.
-
-Return ONLY JSON: {"o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}`};
+Reply with ONLY this JSON and nothing else: {"a":[[3 strings] x10]}`};
   }
   return null;
 }
@@ -91,7 +100,7 @@ export default async (req) => {
   if(process.env.GAME_PASSWORD && body.password !== process.env.GAME_PASSWORD) return Response.json({error: "password"}, {status: 401});
 
   const ip = req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "anon";
-  const counts = body.type === "plan" || (body.type === "homecat" && +body.pos === 0);
+  const counts = body.type === "plan" || (body.type === "homecat" && +body.pos === 0 && body.part !== "alts");
   if(counts && limited(ip)) return Response.json({error: "rate_limited"}, {status: 429});
 
   const prompt = buildPrompt(body);
@@ -124,7 +133,7 @@ export default async (req) => {
   const m = text.match(/\{[\s\S]*\}/);
   try { return Response.json({deck: JSON.parse(m ? m[0] : "")}); }
   catch {
-    console.error("Unreadable output", data.stop_reason, text.slice(0, 500));
+    console.error("Unreadable output", body.type, body.part, data.stop_reason, JSON.stringify(data.usage), (data.content || []).map(c => c.type).join(","), text.slice(0, 500));
     return Response.json({error: "bad_output", status: data.stop_reason === "max_tokens" ? "too_long" : "json"}, {status: 502});
   }
 };
