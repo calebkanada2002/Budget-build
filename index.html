@@ -1242,16 +1242,21 @@ async function makeRoomSystem(){
   const C = window.BB_CONFIG || {};
   if(!window.supabase || !C.SUPABASE_URL || !C.SUPABASE_KEY || /PASTE/.test(C.SUPABASE_URL + C.SUPABASE_KEY)) return null;
   const client = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY);
-  const tabId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-  const joinedAt = Date.now();
+  // Keep the same player id if this tab reloads, so a refresh doesn't create a "new" player.
+  let tabId = null, joinedAt = Date.now();
+  try { tabId = sessionStorage.getItem("bb-tab"); joinedAt = +sessionStorage.getItem("bb-joined") || joinedAt; } catch(e){}
+  if(!tabId){ tabId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+  try { sessionStorage.setItem("bb-tab", tabId); sessionStorage.setItem("bb-joined", String(joinedAt)); } catch(e){}
   return { join: async (name) => {
     const ch = client.channel(name, {config: {presence: {key: tabId}}});
-    let mine = {}, snapshot = [], listeners = [], timer = null;
+    let mine = {}, snapshot = [], listeners = [], timer = null, joined = false;
+    const known = new Map(); // last thing we heard from each player, kept even if they drop for a moment
     const rebuild = () => {
       const st = ch.presenceState(), list = [];
       Object.entries(st).forEach(([k, metas]) => {
         const last = metas[metas.length - 1] || {};
         if(k === tabId) return;
+        known.set(k, {presence: last.s || {}, joined: last.j || 0, at: Date.now()});
         list.push({peer: k, kind: "viewer", sameTab: false, isMe: false, guest: false, by: null, presence: Object.freeze(last.s || {}), joined: last.j || 0});
       });
       list.push({peer: tabId, kind: "viewer", sameTab: true, isMe: true, guest: false, by: null, presence: Object.freeze(Object.assign({}, mine)), joined: joinedAt});
@@ -1260,14 +1265,23 @@ async function makeRoomSystem(){
       listeners.forEach(f => { try { f({peers: snapshot}); } catch(e){ console.error(e); } });
     };
     ch.on("presence", {event: "sync"}, rebuild);
+    const send = () => { timer = null; if(joined) ch.track({s: mine, j: joinedAt}).catch(() => {}); };
     await new Promise((res, rej) => {
       const t = setTimeout(() => rej(new Error("timeout")), 10000);
       ch.subscribe(status => {
-        if(status === "SUBSCRIBED"){ clearTimeout(t); res(); }
-        else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT"){ clearTimeout(t); rej(new Error(status)); }
+        if(status === "SUBSCRIBED"){
+          clearTimeout(t);
+          if(!joined){ joined = true; res(); } else send(); // reconnected: put our state back
+        }
+        else if((status === "CHANNEL_ERROR" || status === "TIMED_OUT") && !joined){ clearTimeout(t); rej(new Error(status)); }
       });
     });
-    const send = () => { timer = null; ch.track({s: mine, j: joinedAt}).catch(() => {}); };
+    // Re-announce ourselves every few seconds and whenever the phone wakes up, so a dropped
+    // connection heals itself without anyone doing anything.
+    const beat = setInterval(send, 8000);
+    const wake = () => { if(document.visibilityState === "visible") send(); };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", send);
     rebuild();
     return {
       name,
@@ -1278,9 +1292,10 @@ async function makeRoomSystem(){
         if(!timer) timer = setTimeout(send, 60);
       },
       peers: () => snapshot,
+      lastKnown: (id) => { const k = known.get(id); return k ? k.presence : null; },
       onPeers: (f) => { listeners.push(f); setTimeout(() => f({peers: snapshot}), 0); return () => { listeners = listeners.filter(x => x !== f); }; },
       connected: () => true,
-      leave: async () => { try { await ch.untrack(); await client.removeChannel(ch); } catch(e){} }
+      leave: async () => { clearInterval(beat); document.removeEventListener("visibilitychange", wake); window.removeEventListener("online", send); try { await ch.untrack(); await client.removeChannel(ch); } catch(e){} }
     };
   }};
 }
@@ -1294,6 +1309,9 @@ function gBudget(){ const g = game(); return (g && g.budget) || 24; }
 (async () => {
   try { ROOM = await makeRoomSystem(); } catch(e) { ROOM = null; }
   roomReady = true;
+  // If this tab was in a game and got refreshed, jump right back in.
+  let saved = null; try { saved = JSON.parse(sessionStorage.getItem("bb-session") || "null"); } catch(e){}
+  if(ROOM && saved && saved.code && state.screen === "menu"){ await joinRoom(saved.code, saved.name, false, saved.tv, saved.pres); return; }
   if(state.screen === "menu") render();
 })();
 
@@ -1303,16 +1321,22 @@ function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
 function setPres(patch){
   Object.assign(myPres, patch);
   if(R) R.presence(patch).catch(()=>{});
+  saveSession();
   render();
 }
+function saveSession(){ try { if(ME) sessionStorage.setItem("bb-session", JSON.stringify({code: ME.code, name: ME.name, tv: ME.tv, pres: myPres})); } catch(e){} }
+function clearSession(){ try { sessionStorage.removeItem("bb-session"); } catch(e){} }
 function peersNow(){ return R ? R.peers().filter(p => p.kind === "viewer" && p.presence && p.presence.name) : []; }
 function mePeer(){ return R ? R.peers().find(p => p.sameTab) : null; }
 function myId(){ const m = mePeer(); return m ? m.peer : null; }
 function hostPeer(){ return peersNow().find(p => p.presence.game); }
-function game(){ const hp = hostPeer(); return hp ? hp.presence.game : null; }
+let lastGame = null;
+function game(){ const hp = hostPeer(); if(hp){ lastGame = hp.presence.game; return lastGame; } return R ? lastGame : null; }
+function isLive(id){ return peersNow().some(x => x.peer === id); }
+function hostLive(){ return !!hostPeer(); }
 function iAmHost(){ return !!myPres.game; }
-function nameOf(id){ const p = peersNow().find(x => x.peer === id); return p ? String(p.presence.name).slice(0,20) : "(left)"; }
-function presOf(id){ const p = peersNow().find(x => x.peer === id); return p ? p.presence : null; }
+function presOf(id){ const p = peersNow().find(x => x.peer === id); if(p) return p.presence; return (R && R.lastKnown) ? R.lastKnown(id) : null; }
+function nameOf(id){ const pr = presOf(id); return pr && pr.name ? String(pr.name).slice(0,20) : "(left)"; }
 function picksOf(id){ const g = game(), pr = presOf(id); return (g && pr && pr.round === g.round && Array.isArray(pr.picks)) ? pr.picks : []; }
 function flippedOf(id){ const g = game(), pr = presOf(id); return (g && pr && pr.round === g.round && Array.isArray(pr.flipped)) ? pr.flipped : []; }
 
@@ -1397,19 +1421,26 @@ async function joinGame(){
   lsSet("bb-name", name);
   await joinRoom(code, name, false);
 }
-async function joinRoom(code, name, host, tv){
+async function joinRoom(code, name, host, tv, restore){
   roomErr = "";
   try { R = await ROOM.join("bb-" + code); }
   catch(e){ roomErr = "Couldn't join that room. Try again."; render(); return; }
   ME = {code, name, tv: !!tv};
-  myPres = {name, round:0, picks:[], flipped:[], vote:null};
+  myPres = restore ? Object.assign({name, round:0, picks:[], flipped:[], vote:null}, restore) : {name, round:0, picks:[], flipped:[], vote:null};
   if(tv) myPres.tv = true;
   if(host) myPres.game = {deck:"pizza", request:"", judge:null, order:[], round:0, scores:{}, scoredRound:0, winner:null, timer:0};
   R.presence(myPres).catch(()=>{});
+  saveSession();
   R.onPeers(onRoomChange);
   state.screen = "online";
+  keepAwake();
   render();
 }
+let wakeLock = null;
+async function keepAwake(){
+  try { if("wakeLock" in navigator && !wakeLock){ wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); } } catch(e){}
+}
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible" && R) keepAwake(); });
 let lastWinSound = 0;
 function onRoomChange(){
   const g = game();
@@ -1432,6 +1463,11 @@ function onRoomChange(){
     }
   }
   render();
+}
+function hostSkipPlayer(id){
+  const G = myPres.game; if(!G || !G.order.includes(id)) return;
+  setPres({game: Object.assign({}, G, {order: G.order.filter(x => x !== id)})});
+  onRoomChange();
 }
 function hostStartRound(){
   let G = myPres.game; const me = myId();
@@ -1628,7 +1664,8 @@ let leaveArmed = false;
 async function leaveRoom(){
   if(!leaveArmed){ leaveArmed = true; render(); setTimeout(()=>{ leaveArmed = false; render(); }, 3000); return; }
   leaveArmed = false;
-  const r = R; R = null; ME = null;
+  const r = R; R = null; ME = null; lastGame = null; clearSession();
+  try { sessionStorage.removeItem("bb-tab"); sessionStorage.removeItem("bb-joined"); } catch(e){}
   myPres = {name:"", round:0, picks:[], flipped:[], vote:null};
   state.screen = "menu"; roomErr = "";
   render();
@@ -1700,7 +1737,7 @@ function online(){
       ${roomErr ? `<p class="warn">${esc(roomErr)}</p>` : ""}`;
   }
 
-  const req = `<div class="request"><small>Round ${g.round} · ${esc(nameOf(g.judge))} is judging · Budget $${gBudget()}</small><b>${esc(g.request)}</b></div>`;
+  const req = (hostLive() ? "" : `<p class="warn center">The host lost connection. The game will continue when they're back. Tell them to keep their screen on!</p>`) + `<div class="request"><small>Round ${g.round} · ${esc(nameOf(g.judge))} is judging · Budget $${gBudget()}</small><b>${esc(g.request)}</b></div>`;
   const inRound = g.order.includes(me);
   const d = deckOf(g);
 
@@ -1721,7 +1758,9 @@ function online(){
         ${anyOk ? "" : `<button class="btn" style="margin-top:10px" onclick="onlinePick('l')">🗑️ Nothing left. Take the leftovers ($0)</button>`}
         ${takenRow}</div>`;
     } else {
-      body = `<div class="cat center"><b>Stop ${t.stop+1}: ${c.n}</b><p style="font-size:18px;font-weight:900">⏳ ${esc(nameOf(t.cur))} is picking…${timerChip()}</p>${takenRow}</div>`;
+      const gone = !isLive(t.cur);
+      body = `<div class="cat center"><b>Stop ${t.stop+1}: ${c.n}</b><p style="font-size:18px;font-weight:900">⏳ ${esc(nameOf(t.cur))} is picking…${timerChip()}</p>
+        ${gone ? `<p class="warn">${esc(nameOf(t.cur))} lost connection. Waiting for them to come back…</p>${iAmHost() ? `<button class="btn ghost" onclick="hostSkipPlayer('${t.cur}')">⏭ Remove ${esc(nameOf(t.cur))} from this round</button>` : ""}` : ""}${takenRow}</div>`;
     }
     const mine = inRound ? `<div class="bar"><div class="in"><div class="barline"><span>Your build: $${mySpent()} / $${gBudget()}</span><div class="tokens">${[10,9,8,7,6,5,4,3,2,1].map(x=>`<div class="tok ${myUsed().has(x)?'gone':''}">${x}</div>`).join("")}</div></div>
       <p class="muted" style="margin:6px 0 0">${myPres.picks.map((p,i)=>`${d.cats[i].n.split(" ")[0]} ${p.m?'❓':p.l?'🗑️':'$'+p.t}`).join(" · ") || "No picks yet"}</p></div></div>` : "";
