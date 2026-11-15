@@ -1973,11 +1973,17 @@ let SAMPLE = null, genBusy = false, genMsg = "";
       AI_NEEDS_PASSWORD = !!info.password;
       SAMPLE = {json: async (params) => {
         const res = await fetch("/.netlify/functions/make-deck", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(Object.assign({password: lsGet("bb-aipw")}, params))});
-        const out = await res.json().catch(() => ({}));
         if(res.status === 429) throw {code:"rate_limited"};
         if(res.status === 401) throw {code:"password"};
-        if(!res.ok || !out.deck) throw {code:"failed"};
-        return out.deck;
+        const text = await res.text().catch(() => "");
+        if(!res.ok){
+          let info = {}; try { info = JSON.parse(text); } catch(e){}
+          throw {code: "failed", status: info.status || res.status, why: info.why || ""};
+        }
+        if(text.includes("[[ERROR]]")) throw {code: "failed", status: "stream"};
+        const m = text.match(/\{[\s\S]*\}/);
+        if(!m) throw {code: "failed", status: "empty"};
+        try { return JSON.parse(m[0]); } catch(e){ throw {code: "failed", status: "json"}; }
       }};
     }
   } catch(e){ SAMPLE = null; }
@@ -2022,7 +2028,13 @@ async function runGen(prompt, theme, forOnline, extra){
     } else { state.deck = "custom"; state.request = null; }
     genMsg = `✅ "${deck.name}" deck is ready!`;
   } catch(e){
-    genMsg = e && e.code === "rate_limited" ? "Too many requests. Wait a minute and try again." : e && e.code === "password" ? "Wrong AI password. Ask the host for it." : "Couldn't make that deck. Try again or try a different theme.";
+    genMsg = e && e.code === "rate_limited" ? "Too many requests. Wait a minute and try again." : e && e.code === "password" ? "Wrong AI password. Ask the host for it."
+      : e && e.status === 401 ? "The AI key isn't working (error 401). Make a new key at console.anthropic.com and update ANTHROPIC_API_KEY in Netlify."
+      : e && e.why === "credits" ? "The AI account is out of credits. Add credits at console.anthropic.com (Billing)."
+      : e && (e.why === "model" || e.status === 404) ? `The AI model setting looks wrong (error ${e.status}). Check ANTHROPIC_MODEL in Netlify, or delete it to use the default.`
+      : e && (e.status === 529 || e.status === 503) ? "The AI is busy right now. Try again in a minute."
+      : e && e.status === 402 ? "The AI account is out of credits. Add credits at console.anthropic.com."
+      : `Couldn't make that deck${e && e.status ? ` (error ${e.status})` : ""}. Try again or try a different theme.`;
   }
   genBusy = false; render();
 }
