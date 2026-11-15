@@ -1576,18 +1576,19 @@ function editorBox(selected){
 async function makeRoomSystem(){
   const C = window.BB_CONFIG || {};
   if(!window.supabase || !C.SUPABASE_URL || !C.SUPABASE_KEY || /PASTE/.test(C.SUPABASE_URL + C.SUPABASE_KEY)) return null;
-  const client = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY);
+  // worker: keeps the connection's heartbeat running even when a phone puts the tab in the background
+  const client = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY, {realtime: {worker: true, params: {eventsPerSecond: 8}}});
   // Keep the same player id if this tab reloads, so a refresh doesn't create a "new" player.
   let tabId = null, joinedAt = Date.now();
   try { tabId = sessionStorage.getItem("bb-tab"); joinedAt = +sessionStorage.getItem("bb-joined") || joinedAt; } catch(e){}
   if(!tabId){ tabId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
   try { sessionStorage.setItem("bb-tab", tabId); sessionStorage.setItem("bb-joined", String(joinedAt)); } catch(e){}
   return { join: async (name) => {
-    const ch = client.channel(name, {config: {presence: {key: tabId}}});
-    let mine = {}, snapshot = [], listeners = [], timer = null, joined = false;
+    let ch = null, mine = {}, snapshot = [], listeners = [], topicHandlers = {}, timer = null;
+    let live = false, lastSentJson = "", lastSendAt = 0, downSince = 0, closed = false;
     const known = new Map(); // last thing we heard from each player, kept even if they drop for a moment
     const rebuild = () => {
-      const st = ch.presenceState(), list = [];
+      const st = ch ? ch.presenceState() : {}, list = [];
       Object.entries(st).forEach(([k, metas]) => {
         const last = metas[metas.length - 1] || {};
         if(k === tabId) return;
@@ -1599,38 +1600,64 @@ async function makeRoomSystem(){
       snapshot = list;
       listeners.forEach(f => { try { f({peers: snapshot}); } catch(e){ console.error(e); } });
     };
-    ch.on("presence", {event: "sync"}, rebuild);
-    const send = () => { timer = null; if(joined) ch.track({s: mine, j: joinedAt}).catch(() => {}); };
-    await new Promise((res, rej) => {
-      const t = setTimeout(() => rej(new Error("timeout")), 10000);
+    // Send our state, but never more than ~2-3 times a second and never if nothing changed.
+    // (The free Supabase plan only allows about 20 presence updates per second for the whole project.)
+    const send = (force) => {
+      timer = null; if(!live || !ch) return;
+      const json = JSON.stringify(mine);
+      if(!force && json === lastSentJson) return;
+      lastSentJson = json; lastSendAt = Date.now();
+      ch.track({s: mine, j: joinedAt}).catch(() => { lastSentJson = ""; });
+    };
+    const schedule = () => { if(timer) return; timer = setTimeout(send, Math.max(80, 400 - (Date.now() - lastSendAt))); };
+    const connect = () => new Promise((res, rej) => {
+      if(ch){ try { client.removeChannel(ch); } catch(e){} }
+      live = false;
+      ch = client.channel(name, {config: {presence: {key: tabId}, broadcast: {self: false}}});
+      ch.on("presence", {event: "sync"}, rebuild);
+      ch.on("broadcast", {event: "*"}, (msg) => {
+        (topicHandlers[msg.event] || []).forEach(f => { try { f({topic: msg.event, data: msg.payload, peer: msg.payload && msg.payload._from}); } catch(e){} });
+      });
+      let settled = false;
+      const t = setTimeout(() => { if(!settled){ settled = true; rej(new Error("timeout")); } }, 12000);
       ch.subscribe(status => {
         if(status === "SUBSCRIBED"){
-          clearTimeout(t);
-          if(!joined){ joined = true; res(); } else send(); // reconnected: put our state back
+          live = true; downSince = 0; lastSentJson = ""; send(true);   // (re)connected: put our state back
+          if(!settled){ settled = true; clearTimeout(t); res(); }
+          rebuild();
+        } else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED"){
+          live = false; if(!downSince) downSince = Date.now();
+          if(!settled){ settled = true; clearTimeout(t); rej(new Error(status)); }
+          rebuild();
         }
-        else if((status === "CHANNEL_ERROR" || status === "TIMED_OUT") && !joined){ clearTimeout(t); rej(new Error(status)); }
       });
     });
-    // Re-announce ourselves every few seconds and whenever the phone wakes up, so a dropped
-    // connection heals itself without anyone doing anything.
-    const beat = setInterval(send, 8000);
-    const wake = () => { if(document.visibilityState === "visible") send(); };
+    await connect();
+    // Watchdog: if the connection has been down for 8+ seconds, rebuild it from scratch.
+    const watchdog = setInterval(() => {
+      if(closed) return;
+      if(!live && downSince && Date.now() - downSince > 8000){ downSince = Date.now(); connect().catch(() => {}); }
+    }, 3000);
+    const wake = () => { if(document.visibilityState === "visible"){ if(live) send(true); else { downSince = Date.now() - 9000; } } };
     document.addEventListener("visibilitychange", wake);
-    window.addEventListener("online", send);
+    window.addEventListener("online", wake);
     rebuild();
     return {
       name,
       presence: async (patch) => {
         const next = Object.assign({}, mine);
         Object.keys(patch).forEach(k => { if(patch[k] === null) delete next[k]; else next[k] = patch[k]; });
-        mine = next; rebuild();
-        if(!timer) timer = setTimeout(send, 60);
+        mine = next; rebuild(); schedule();
       },
+      // One-off moments (like emoji reactions) go out as broadcasts so they don't use up presence updates.
+      emit: async (topic, data) => { if(live && ch) ch.send({type: "broadcast", event: topic, payload: Object.assign({_from: tabId}, data || {})}).catch(() => {}); },
+      on: (topic, f) => { (topicHandlers[topic] = topicHandlers[topic] || []).push(f); return () => { topicHandlers[topic] = topicHandlers[topic].filter(x => x !== f); }; },
       peers: () => snapshot,
       lastKnown: (id) => { const k = known.get(id); return k ? k.presence : null; },
       onPeers: (f) => { listeners.push(f); setTimeout(() => f({peers: snapshot}), 0); return () => { listeners = listeners.filter(x => x !== f); }; },
-      connected: () => true,
-      leave: async () => { clearInterval(beat); document.removeEventListener("visibilitychange", wake); window.removeEventListener("online", send); try { await ch.untrack(); await client.removeChannel(ch); } catch(e){} }
+      connected: () => live,
+      reconnect: () => { downSince = Date.now() - 9000; },
+      leave: async () => { closed = true; clearInterval(watchdog); document.removeEventListener("visibilitychange", wake); window.removeEventListener("online", wake); try { await ch.untrack(); await client.removeChannel(ch); } catch(e){} }
     };
   }};
 }
@@ -1788,6 +1815,7 @@ async function joinRoom(code, name, host, tv, restore){
   R.presence(myPres).catch(()=>{});
   saveSession();
   R.onPeers(onRoomChange);
+  _reactSub = null; listenReactions();
   state.screen = "online";
   keepAwake();
   render();
@@ -2121,9 +2149,10 @@ function online(){
   const g = game(), me = myId();
   const code = ME.code.toUpperCase();
   const people = playersNow();
+  const _connTop = () => (R && R.connected && !R.connected()) ? `<div class="warn center" style="background:#fdecea;border-radius:12px;padding:10px;margin:6px 0">📡 Reconnecting… <button class="btn ghost" style="width:auto;padding:4px 10px;font-size:13px;margin-left:6px" onclick="R.reconnect && R.reconnect()">Retry now</button></div>` : "";
   const leaveLabel = leaveArmed ? (iAmHost() ? "Tap again to end the game" : "Tap again to leave") : "Leave";
   const head = `<div class="barline" style="margin-bottom:6px"><span class="muted">Room <b style="color:var(--ink);font-size:18px;letter-spacing:2px">${code}</b> · ${people.length} here</span>
-    <div style="display:flex;gap:6px"><button class="btn ghost" style="width:auto;padding:6px 10px;font-size:13px" onclick="state.showInvite=true;render(true)">📲 Invite</button>${soundBtn()}<button class="btn ghost" style="width:auto;padding:6px 12px;font-size:13px;${leaveArmed?'background:var(--bad);color:#fff;border-color:var(--bad)':''}" onclick="leaveRoom()">${leaveLabel}</button></div></div>`;
+    <div style="display:flex;gap:6px"><button class="btn ghost" style="width:auto;padding:6px 10px;font-size:13px" onclick="state.showInvite=true;render(true)">📲 Invite</button>${soundBtn()}<button class="btn ghost" style="width:auto;padding:6px 12px;font-size:13px;${leaveArmed?'background:var(--bad);color:#fff;border-color:var(--bad)':''}" onclick="leaveRoom()">${leaveLabel}</button></div></div>` + _connTop();
   if(!g) return head + `<div class="cat center"><b>Waiting for the host…</b><p class="muted">If the host left, tap Leave and host a new game.</p></div>`;
   const scoreList = people.map(p => `<div class="rv"><div class="n">${esc(nameOf(p.peer))}${p.sameTab?' (you)':''}${p.peer===g.judge&&g.round?' · 🎤 judge':''}${p.presence.game && !p.presence.game.handoff?' · 👑 host':''}${!isLive(p.peer)?' · 📵':''}</div>
     <div style="display:flex;gap:6px;align-items:center">${iAmHost() && !p.sameTab ? `<button class="btn ghost" style="width:auto;padding:3px 8px;font-size:12px" onclick="hostHandoff('${p.peer}')" title="Make host">👑 Make host</button>` : ""}<span class="p">${scoreBump(p.peer, g.scores[p.peer]||0, `<span>${g.scores[p.peer]||0}</span>`)} / ${g.target||5}</span></div></div>`).join("");
@@ -2522,7 +2551,16 @@ function lastRoom(){ try { const r = JSON.parse(lsGet("bb-lastroom") || "null");
 /* ---- Floating emoji reactions ---- */
 const REACTS = ["😂","🔥","💀","😱","👏","🤢"];
 let lastReact = 0; const seenReact = {};
-function react(e){ if(Date.now() - lastReact < 700) return; lastReact = Date.now(); sfx("pop"); setPres({react: {e, at: Date.now()}}); }
+function react(e){
+  if(Date.now() - lastReact < 900) return; lastReact = Date.now(); sfx("pop");
+  floatEmoji(e, nameOf(myId()));
+  if(R && R.emit) R.emit("react", {e}); else setPres({react: {e, at: Date.now()}});
+}
+let _reactSub = null;
+function listenReactions(){
+  if(!R || !R.on || _reactSub) return;
+  _reactSub = R.on("react", m => { const d = m.data || {}; if(REACTS.includes(d.e)) floatEmoji(d.e, nameOf(d._from)); });
+}
 function reactBar(){ return `<div class="reactbar">${REACTS.map(e => `<button onclick="react('${e}')">${e}</button>`).join("")}</div>`; }
 function floatEmoji(e, who){
   try {
@@ -2581,13 +2619,19 @@ function handoffChecks(){
   if(!hostLive() && lastGame){
     if(!hostGoneSince) hostGoneSince = Date.now();
     const first = playersNow()[0];
-    if(Date.now() - hostGoneSince > 20000 && first && first.peer === me && !iAmHost()){
+    if(Date.now() - hostGoneSince > 45000 && first && first.peer === me && !iAmHost() && R.connected && R.connected()){
       hostGoneSince = 0;
       setPres({game: Object.assign({}, lastGame, {handoff: null, hostAt: Date.now()})});
     }
   } else hostGoneSince = 0;
 }
-setInterval(() => { if(R) { handoffChecks(); } }, 2000);
+let _lastConn = true;
+setInterval(() => {
+  if(!R) return;
+  handoffChecks();
+  const c = R.connected ? R.connected() : true;
+  if(c !== _lastConn){ _lastConn = c; render(); }
+}, 2000);
 
 /* ---- Game length, deck vote, champion, history, stats ---- */
 function hostSetTarget(n){ SET.target = n; lsSet("bb-target", String(n)); setPres({game: Object.assign({}, myPres.game, {target: n})}); }
