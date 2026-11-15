@@ -20,42 +20,53 @@ const ERA_TEXT = {
 };
 const clip = (s, n) => String(s || "").replace(/[\u0000-\u001f`$\\]/g, "").trim().slice(0, n);
 
+const RULES = `Every option must be under 28 characters. Keep it funny and clean. Real brands, restaurants, famous people, athletes, shows and characters are welcome when they fit the theme. Poke fun lightly, the way fans joke, never cruel.`;
+const CAT_SHAPE = `- "o": exactly 10 options ranked from BEST to WORST. Index 0 is the $10 pick (dreamy, amazing), the middle ones are average and ordinary, and the last few are funny, gross or terrible (index 9 is the $1 pick, the worst).
+- "a": exactly 10 lists, one per price in the same order as "o", each with 3 MORE different options of the same quality as that price. No repeats anywhere.
+- "g": 2 surprise GOOD mystery outcomes (fun jackpots)
+- "b": 2 surprise BAD mystery outcomes (funny disasters)`;
+
+// The deck is written in small pieces (a plan, then one call per stop, run at the same time)
+// so every call finishes well inside Netlify's 10-second limit.
 function buildPrompt(body){
-  if(body.type === "theme"){
+  if(body.type === "plan"){
     const theme = clip(body.theme, 40);
     if(!theme) return null;
-    return `You are writing a deck for a family-friendly party game called Budget Build. Players build a "${theme}" one stop at a time with a limited budget.
+    return {max: 300, text: `You are planning a deck for a family-friendly party game called Budget Build. Players build a "${theme}" one stop at a time with a limited budget.
 
-Make exactly 5 categories (stops) for building a ${theme}. For each category give:
-- "n": an emoji plus a short category name (under 20 characters), e.g. "🍕 Crust"
-- "o": exactly 10 options ranked from BEST to WORST. Index 0 is the $10 pick (dreamy, luxurious, amazing), the middle ones are average and ordinary, and the last few are funny, gross or terrible (index 9 is the $1 pick, the worst).
-- "a": exactly 10 lists, one per price in the same order as "o", each with 3 MORE different options of the same quality as that price (so every price has 4 possible options in total). No repeats anywhere in the category.
-- "g": 2 surprise GOOD mystery outcomes (fun jackpots)
-- "b": 2 surprise BAD mystery outcomes (funny disasters)
+Pick exactly 5 categories (stops) for building a ${theme}. Each is an emoji plus a short name under 20 characters, like "🍕 Crust".
 
-Every option must be under 28 characters. Keep it funny and clean. Real brands, restaurants, famous people, athletes, shows and characters are welcome when they fit the theme (e.g. a real player's shooting, a real restaurant's dish). Poke fun lightly, the way sports and pop-culture fans joke, never cruel.
-
-Return ONLY JSON in this exact shape:
-{"name":"short deck name","emoji":"one emoji","cats":[{"n":"...","o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}]}`;
+Return ONLY JSON: {"name":"short deck name","emoji":"one emoji","cats":["...","...","...","...","..."]}`};
   }
-  if(body.type === "home"){
-    const team = clip(body.team, 40), sport = body.sport, era = body.era;
-    if(!team || !POSITIONS[sport] || !ERA_TEXT[era]) return null;
-    return `You are writing a deck for a party game called Budget Build. Players draft a ${sport} lineup for the ${team}, one position at a time, with a limited budget.
+  if(body.type === "cat"){
+    const theme = clip(body.theme, 40), cat = clip(body.cat, 30);
+    if(!theme || !cat) return null;
+    return {max: 1800, text: `You are writing one stop of a deck for a family-friendly party game called Budget Build. Players build a "${theme}" with a limited budget. This stop is "${cat}".
+
+Give:
+${CAT_SHAPE}
+
+${RULES}
+
+Return ONLY JSON: {"o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}`};
+  }
+  if(body.type === "homecat"){
+    const team = clip(body.team, 40), sport = body.sport, era = body.era, i = +body.pos;
+    const list = POSITIONS[sport] ? POSITIONS[sport].split(", ") : null;
+    if(!team || !list || !ERA_TEXT[era] || !(i >= 0 && i < list.length)) return null;
+    return {max: 1800, text: `You are writing one stop of a deck for a party game called Budget Build. Players draft a ${sport} lineup for the ${team} with a limited budget. This stop is the ${list[i]} position.
 
 Use only ${ERA_TEXT[era]}. Every player must have really played for the ${team}.
 
-Make exactly 5 categories, one per position, in this order: ${POSITIONS[sport]}. For each category give:
-- "n": an emoji plus the position name (under 20 characters)
+Give:
 - "o": exactly 10 real players at that position, ranked from BEST (index 0, the $10 pick) to WORST (index 9, the $1 pick). Top picks are stars and fan favorites, the middle are solid players, the bottom can be famous busts or forgettable backups.
-- "a": exactly 10 lists, one per price in the same order as "o", each with 3 MORE real players from the team of about the same quality as that price. No player may appear twice in a category.
+- "a": exactly 10 lists, one per price in the same order as "o", each with 3 MORE real players from the team of about the same quality. No player may appear twice.
 - "g": 2 surprise GOOD mystery players (underrated gems or cult heroes from the team)
 - "b": 2 surprise BAD mystery outcomes (famous busts or funny disasters)
 
-Every entry must be under 28 characters. Keep it fun; poke fun lightly the way fans do, never cruel. If you are unsure a current player is still on the roster, prefer players you are confident about.
+Every entry must be under 28 characters. Keep it fun, never cruel. If unsure a current player is still on the roster, prefer players you are confident about.
 
-Return ONLY JSON in this exact shape:
-{"name":"short deck name","emoji":"one emoji","cats":[{"n":"...","o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}]}`;
+Return ONLY JSON: {"o":["...x10"],"a":[["...","...","..."],"...x10"],"g":["...","..."],"b":["...","..."]}`};
   }
   return null;
 }
@@ -80,14 +91,12 @@ export default async (req) => {
   if(process.env.GAME_PASSWORD && body.password !== process.env.GAME_PASSWORD) return Response.json({error: "password"}, {status: 401});
 
   const ip = req.headers.get("x-nf-client-connection-ip") || req.headers.get("x-forwarded-for") || "anon";
-  if(limited(ip)) return Response.json({error: "rate_limited"}, {status: 429});
+  const counts = body.type === "plan" || (body.type === "homecat" && +body.pos === 0);
+  if(counts && limited(ip)) return Response.json({error: "rate_limited"}, {status: 429});
 
   const prompt = buildPrompt(body);
   if(!prompt) return Response.json({error: "bad_request"}, {status: 400});
 
-  // Ask Claude with streaming on, and pass the text straight through to the browser.
-  // A normal Netlify function is cut off after 10 seconds, which is shorter than it takes
-  // to write a whole deck. A streamed response is allowed to keep going (up to 60 seconds).
   let r;
   try {
     r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -95,48 +104,27 @@ export default async (req) => {
       headers: {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5",
-        max_tokens: 8000,
-        stream: true,
-        messages: [{role: "user", content: prompt}]
+        max_tokens: prompt.max,
+        messages: [{role: "user", content: prompt.text}]
       })
     });
   } catch(e){
     console.error("Could not reach Anthropic", e);
-    return Response.json({error: "upstream", detail: "network"}, {status: 502});
+    return Response.json({error: "upstream", status: "network"}, {status: 502});
   }
   if(r.status === 429) return Response.json({error: "rate_limited"}, {status: 429});
   if(!r.ok){
     const detail = await r.text().catch(() => "");
     console.error("Anthropic error", r.status, detail);
-    // 401 = bad or revoked API key, 400/404 = model name problem, 529 = Anthropic overloaded
     const why = /credit balance/i.test(detail) ? "credits" : /model/i.test(detail) ? "model" : "";
     return Response.json({error: "upstream", status: r.status, why}, {status: 502});
   }
-
-  const enc = new TextEncoder(), dec = new TextDecoder();
-  const out = new ReadableStream({
-    async start(controller){
-      const reader = r.body.getReader();
-      let buf = "";
-      try {
-        while(true){
-          const {value, done} = await reader.read();
-          if(done) break;
-          buf += dec.decode(value, {stream: true});
-          let i;
-          while((i = buf.indexOf("\n")) >= 0){
-            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-            if(!line.startsWith("data:")) continue;
-            let ev; try { ev = JSON.parse(line.slice(5)); } catch { continue; }
-            if(ev.type === "content_block_delta" && ev.delta && ev.delta.text) controller.enqueue(enc.encode(ev.delta.text));
-            if(ev.type === "error"){ console.error("Anthropic stream error", JSON.stringify(ev)); controller.enqueue(enc.encode("\n[[ERROR]]")); }
-          }
-        }
-      } catch(e){
-        console.error("Stream broke", e); controller.enqueue(enc.encode("\n[[ERROR]]"));
-      }
-      controller.close();
-    }
-  });
-  return new Response(out, {headers: {"content-type": "text/plain; charset=utf-8", "cache-control": "no-store"}});
+  const data = await r.json().catch(() => ({}));
+  const text = (data.content || []).filter(c => c.type === "text").map(c => c.text || "").join("");
+  const m = text.match(/\{[\s\S]*\}/);
+  try { return Response.json({deck: JSON.parse(m ? m[0] : "")}); }
+  catch {
+    console.error("Unreadable output", data.stop_reason, text.slice(0, 500));
+    return Response.json({error: "bad_output", status: data.stop_reason === "max_tokens" ? "too_long" : "json"}, {status: 502});
+  }
 };
