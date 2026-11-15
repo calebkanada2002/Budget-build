@@ -85,24 +85,58 @@ export default async (req) => {
   const prompt = buildPrompt(body);
   if(!prompt) return Response.json({error: "bad_request"}, {status: 400});
 
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-    body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5",
-      max_tokens: 8000,
-      messages: [{role: "user", content: prompt}]
-    })
-  });
+  // Ask Claude with streaming on, and pass the text straight through to the browser.
+  // A normal Netlify function is cut off after 10 seconds, which is shorter than it takes
+  // to write a whole deck. A streamed response is allowed to keep going (up to 60 seconds).
+  let r;
+  try {
+    r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+      body: JSON.stringify({
+        model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5",
+        max_tokens: 8000,
+        stream: true,
+        messages: [{role: "user", content: prompt}]
+      })
+    });
+  } catch(e){
+    console.error("Could not reach Anthropic", e);
+    return Response.json({error: "upstream", detail: "network"}, {status: 502});
+  }
   if(r.status === 429) return Response.json({error: "rate_limited"}, {status: 429});
   if(!r.ok){
-    console.error("Anthropic error", r.status, await r.text().catch(() => ""));
-    return Response.json({error: "upstream"}, {status: 502});
+    const detail = await r.text().catch(() => "");
+    console.error("Anthropic error", r.status, detail);
+    // 401 = bad or revoked API key, 400/404 = model name problem, 529 = Anthropic overloaded
+    const why = /credit balance/i.test(detail) ? "credits" : /model/i.test(detail) ? "model" : "";
+    return Response.json({error: "upstream", status: r.status, why}, {status: 502});
   }
-  const data = await r.json();
-  const text = (data.content || []).map(c => c.text || "").join("");
-  const m = text.match(/\{[\s\S]*\}/);
-  if(!m) return Response.json({error: "bad_output"}, {status: 502});
-  try { return Response.json({deck: JSON.parse(m[0])}); }
-  catch { return Response.json({error: "bad_output"}, {status: 502}); }
+
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const out = new ReadableStream({
+    async start(controller){
+      const reader = r.body.getReader();
+      let buf = "";
+      try {
+        while(true){
+          const {value, done} = await reader.read();
+          if(done) break;
+          buf += dec.decode(value, {stream: true});
+          let i;
+          while((i = buf.indexOf("\n")) >= 0){
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+            if(!line.startsWith("data:")) continue;
+            let ev; try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+            if(ev.type === "content_block_delta" && ev.delta && ev.delta.text) controller.enqueue(enc.encode(ev.delta.text));
+            if(ev.type === "error"){ console.error("Anthropic stream error", JSON.stringify(ev)); controller.enqueue(enc.encode("\n[[ERROR]]")); }
+          }
+        }
+      } catch(e){
+        console.error("Stream broke", e); controller.enqueue(enc.encode("\n[[ERROR]]"));
+      }
+      controller.close();
+    }
+  });
+  return new Response(out, {headers: {"content-type": "text/plain; charset=utf-8", "cache-control": "no-store"}});
 };
