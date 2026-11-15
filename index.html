@@ -1983,18 +1983,24 @@ let SAMPLE = null, genBusy = false, genMsg = "";
       };
       // Retry a stop once if it comes back broken
       const askTwice = (params) => ask(params).catch(e => (e && (e.code === "rate_limited" || e.code === "password" || e.status === 401 || e.why)) ? Promise.reject(e) : ask(params));
+      // Each stop = the main options + the extra options, written at the same time.
+      // If the extras fail, the stop still works with just the main 10.
+      const bothHalves = async (p) => {
+        const [main, alts] = await Promise.all([askTwice(Object.assign({part: "main"}, p)), askTwice(Object.assign({part: "alts"}, p)).catch(() => null)]);
+        return {o: main.o, g: main.g, b: main.b, a: alts && Array.isArray(alts.a) && alts.a.length >= 10 ? alts.a : undefined};
+      };
       SAMPLE = {json: async (params) => {
         if(params.type === "theme"){
           const plan = await askTwice({type: "plan", theme: params.theme});
           const names = (Array.isArray(plan.cats) ? plan.cats : []).map(x => typeof x === "string" ? x : (x && x.n) || "").filter(Boolean).slice(0, 5);
           if(names.length < 5) throw {code: "failed", status: "plan"};
           genMsg = `✨ Writing ${names.join(", ")}…`; render();
-          const cats = await Promise.all(names.map(n => askTwice({type: "cat", theme: params.theme, cat: n}).then(c => Object.assign({}, c, {n}))));
+          const cats = await Promise.all(names.map(n => bothHalves({type: "cat", theme: params.theme, cat: n}).then(c => Object.assign(c, {n}))));
           return {name: plan.name || params.theme, emoji: plan.emoji || "✨", cats};
         }
         if(params.type === "home"){
           const pos = HOME_POS[params.sport] || [];
-          const cats = await Promise.all(pos.map((n, i) => askTwice({type: "homecat", team: params.team, sport: params.sport, era: params.era, pos: i}).then(c => Object.assign({}, c, {n}))));
+          const cats = await Promise.all(pos.map((n, i) => bothHalves({type: "homecat", team: params.team, sport: params.sport, era: params.era, pos: i}).then(c => Object.assign(c, {n}))));
           return {name: params.team, emoji: params.emoji || "🏟️", cats};
         }
         throw {code: "failed"};
