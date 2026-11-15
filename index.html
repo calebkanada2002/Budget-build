@@ -115,11 +115,23 @@
   .aisle-h b{font-size:18px;font-weight:800;letter-spacing:-.01em}
   .shelf{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x proximity;margin:0 -16px;padding:2px 16px 12px;scrollbar-width:none;border-bottom:4px solid var(--line)}
   .shelf::-webkit-scrollbar{display:none}
-  .shelf .deck{flex:0 0 150px;scroll-snap-align:start;display:flex;flex-direction:column;align-items:flex-start;min-height:132px}
-  .deck .dn{font-weight:800;font-size:16px;line-height:1.15}
+  .shelf .deck{flex:0 0 112px;scroll-snap-align:start;display:flex;flex-direction:column;align-items:flex-start;padding:10px 10px 12px;min-height:88px}
+  .shelf .deck .e{font-size:24px;margin-bottom:6px}
+  .deck .dn{font-weight:800;font-size:14.5px;line-height:1.15}
   .deck .ds{font-weight:500;font-size:12.5px;color:var(--muted);margin-top:auto;padding-top:8px;line-height:1.3}
   .deck.on .ds{color:var(--tagink);opacity:.75}
   body.tv .shelf .deck{flex-basis:200px}
+  /* Computers and tablets: wider page, shelves become grids (no sideways scrolling needed) */
+  @media (min-width:760px){
+    body{max-width:980px;padding:28px 32px 140px}
+    .bar .in{max-width:916px}
+    .shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));overflow:visible;margin:0;padding:0 0 14px}
+    .shelf .deck{min-height:84px}
+    .pgrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+    h1.logo{font-size:56px}
+    .decks{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+    .bar .in > .btn{max-width:420px;margin-left:auto;display:block}
+  }
 
   body.tv{max-width:1400px;padding:28px 36px 40px}
   .tvbig{font-weight:800;font-size:42px;line-height:1.15;letter-spacing:-.02em}
@@ -1062,18 +1074,25 @@ function home(){
   <button class="btn ghost" style="width:auto;padding:8px 14px;font-size:14px" onclick="state.screen='menu';render()">← Menu</button>
   <h2>Pick a deck</h2>
   ${deckPicker(state.deck, true, false, DECKS.custom)}
-  ${state.deck ? `
-    ${state.request ? animWrap("req|" + state.request, "a-stamp", `<div class="request"><small>Judge's request</small><b>${esc(state.request)}</b></div>`, 450) : ""}
-    <div class="row" style="margin-top:14px">
-      <button class="btn ghost" onclick="drawRequest()">${state.request ? "🔄 New request" : "🎤 Draw a request (judge)"}</button>
-    </div>
-    ${timerSlider(state.timer, "setSoloTimer")}
-    <div style="margin-top:10px"><button class="btn alt" onclick="ac();state.seed=Date.now();state.screen='build';state.picks={};state.flipped={};render();scrollTo(0,0)">Start building →</button></div>
-  ` : `<p class="muted center" style="margin-top:14px">Choose a deck to start.</p>`}
+  <h2>Game setup</h2>
+  ${timerSlider(state.timer, "setSoloTimer")}
   ${displayRow()}
+  <div style="height:${state.request ? 90 : 40}px"></div>
+  ${startBar()}
   `;
 }
 
+// Always-visible bar at the bottom of the deck screen: shows the picked deck and the Start button
+function startBar(){
+  const d = state.deck && DECKS[state.deck];
+  if(!d) return `<div class="bar"><div class="in"><p class="center" style="margin:6px 0;font-weight:700">Pick a deck to start</p></div></div>`;
+  return `<div class="bar"><div class="in">
+    <div class="barline"><span style="font-size:17px">${esc(d.emoji)} ${esc(d.name)}</span>
+      <button class="btn ghost" style="width:auto;padding:6px 12px;font-size:14px" onclick="drawRequest()">${state.request ? "🔄 New request" : "🎤 Draw a request"}</button></div>
+    ${state.request ? animWrap("req|" + state.request, "a-pop", `<p style="margin:6px 0 2px;font-weight:700">${esc(state.request)}</p>`, 400) : ""}
+    <button class="btn alt" style="margin-top:8px" onclick="ac();state.seed=Date.now();state.screen='build';state.picks={};state.flipped={};render();scrollTo(0,0)">Start building</button>
+  </div></div>`;
+}
 function build(){
   const d = soloDeck();
   const used = usedTokens();
@@ -1214,8 +1233,8 @@ function sfx(name){
       case "spin":   // quick rising shimmer, then a sparkle
         [523,659,784,988,1175].forEach((f,i) => tone(f, i*0.035, 0.08, "triangle", 0.045));
         bell(1568, 0.19, 0.35, 0.06); break;
-      case "flip":   // card snap: crisp noise + soft thump
-        noise(0, 0.05, 0.16, {freq: 3000, q: 0.6}); tone(160, 0, 0.12, "sine", 0.2, 70, {reverb: false}); break;
+      case "flip":   // light paper "fwip" as the card turns
+        noise(0, 0.07, 0.07, {type: "highpass", freq: 3500}); tone(520, 0, 0.06, "sine", 0.04, 900, {reverb: false}); break;
       case "great":  // bright chime arpeggio + sparkle on top
         [659,831,988,1319].forEach((f,i) => bell(f, i*0.055, 0.45, 0.07));
         noise(0.2, 0.25, 0.04, {type: "highpass", freq: 7000, reverb: true}); break;
@@ -1890,7 +1909,7 @@ let SAMPLE = null, genBusy = false, genMsg = "";
       }};
     }
   } catch(e){ SAMPLE = null; }
-  render();
+  setTimeout(() => render(), 0);
 })();
 let AI_NEEDS_PASSWORD = false;
 function aiPasswordBox(){
@@ -1957,7 +1976,7 @@ async function makeHomeTeam(era, forOnline){
 function deckBtn(k, d, selected, clickable, forOnline, shortName){
   const click = clickable ? (forOnline ? `hostSetDeck('${k}')` : `state.deck='${k}';state.request=null;render()`) : "";
   const stops = (d.cats || []).slice(0, 3).map(c => c.n.replace(/^\S+\s/, "")).join(", ") + ((d.cats || []).length > 3 ? "…" : "");
-  return `<button class="deck ${selected===k?'on':''}" ${clickable?`onclick="${click}"`:'disabled'}><span class="e">${esc(d.emoji)}</span><span class="dn">${esc(shortName || d.name)}${isLocalPack(k) ? " ✏️" : ""}</span><span class="ds">${esc(stops)}</span></button>`;
+  return `<button class="deck ${selected===k?'on':''}" ${clickable?`onclick="${click}"`:'disabled'}><span class="e">${esc(d.emoji)}</span><span class="dn">${esc(shortName || d.name)}${isLocalPack(k) ? " ✏️" : ""}</span></button>`;
 }
 // The deck screen is laid out like store aisles: one swipeable shelf per aisle.
 function aisle(id, title, keys, selected, clickable, forOnline, opts){
@@ -2031,12 +2050,12 @@ function topicBox(forOnline){
 }
 function customBox(forOnline){
   if(!SAMPLE) return topicBox(forOnline);
-  return topicBox(forOnline) + `<div class="cat"><b>✨ Make your own deck</b>
+  return `<div class="cat"><b>✨ Make your own deck</b>
     <p class="muted" style="margin:4px 0 8px">Type any theme and Claude writes the categories and all 10 price tiers.</p>
     ${aiPasswordBox()}
     <input id="th" class="inp" placeholder="e.g. road trip, dream job, school day" maxlength="40">
     <button class="btn" ${genBusy?'disabled':''} onclick="makeDeck(${forOnline})">${genBusy?'Writing…':'Generate deck'}</button>
-    ${genMsg ? `<p class="muted" style="margin:8px 0 0">${esc(genMsg)}</p>` : ""}</div>`;
+    ${genMsg ? `<p class="muted" style="margin:8px 0 0">${esc(genMsg)}</p>` : ""}</div>` + topicBox(forOnline);
 }
 
 let leaveArmed = false;
@@ -2127,7 +2146,7 @@ function online(){
       <h2>Next deck</h2>${g.voteDecks ? `<p class="muted">Decided by the vote above.</p>` : iAmHost() ? deckPicker(g.src || g.deck, true, true, (g.src && g.src !== "custom") ? null : cdk) : `<div class="decks"><button class="deck on" disabled><span class="e">${esc(curD.emoji)}</span>${esc(curD.name)}</button></div>`}
       ${iAmHost() ? modePicker(g) + timerSlider(g.timer, "hostSetTimer") + targetPicker(g) : `<p class="muted center">${isLiveAuc(g) ? "🎤 Live auction · " : isAuction(g) ? "🔨 Sealed bids · " : "🔁 Draft mode · "}${g.blind ? "🙈 Blind judging · " : ""}${g.timer ? `⏱️ ${g.timer}s per pick · ` : ""}🏁 First to ${g.target||5} points</p>`}
       ${!g.round ? `<button class="btn ghost" style="margin-top:10px" onclick="state.showInvite=true;render(true)">📲 Invite friends with a QR code</button>` : ""}
-      ${iAmHost() ? `<div style="margin-top:14px"><button class="btn alt" onclick="ac();hostStartRound()">${g.round ? "Next round →" : "Start game →"}</button></div>
+      ${iAmHost() ? `<div style="height:70px"></div><div class="bar"><div class="in"><div class="barline" style="margin-bottom:8px"><span>${esc(curD.emoji)} ${esc(curD.name)}</span><span class="muted">${people.length} players</span></div><button class="btn alt" onclick="ac();hostStartRound()">${g.round ? "Next round" : "Start game"}</button></div></div>
         <p class="muted center">${g.round ? "The judge moves to the next player." : "You judge first. Share the code so friends can join."}</p>`
         : `<p class="muted center" style="margin-top:14px">Waiting for the host to start…</p>`}
       ${roomErr ? `<p class="warn">${esc(roomErr)}</p>` : ""}`;
