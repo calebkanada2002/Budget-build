@@ -1010,7 +1010,7 @@ function drawRequest(){
 }
 
 function currentStop(){ return Object.keys(state.picks).length; }
-function soloUndoWindow(ci){ state.undo = {ci, until: Date.now() + 3000}; setTimeout(() => { if(state.undo && state.undo.ci === ci){ state.undo = null; if(state.screen === "build") render(); } }, 3050); }
+function soloUndoWindow(ci){ state.undo = {ci, until: Date.now() + 1000}; setTimeout(() => { if(state.undo && state.undo.ci === ci){ state.undo = null; if(state.screen === "build") render(); } }, 1050); }
 function soloUndo(ci){ if(!state.undo || state.undo.ci !== ci || ci !== currentStop() - 1) return; delete state.picks[ci]; state.undo = null; turnKey = ""; sfx("beep"); render(); }
 function setSoloTimer(v){ state.timer = v; SET.timer = v; lsSet("bb-timer", String(v)); }
 
@@ -1067,6 +1067,7 @@ function home(){
       <li>Stops are revealed <b>one at a time</b>. Once you pick, it's locked and the next stop appears.</li>
       <li>You get <b>one ❓ Mystery</b> per round. It's free and doesn't use up a price. Could be great, could be awful.</li>
       <li>Lock in, then take turns showing the judge your build and flipping your mysteries. The judge picks the winner.</li>
+      <li>Only 2 players? It's ⚔️ head to head: no judge, you both build, then both vote. Agree and that build scores; split and it's a tie.</li>
       <li>The winner gets a point. Everyone also votes for 🌪️ Most Chaotic and 💸 Worst Deal for bonus points. First to 5 wins.</li>
       <li>Set a ⏱️ pick timer if you want. Run out of time and you get the leftovers.</li>
     </ol>
@@ -1414,7 +1415,7 @@ function tvView(){
     <div style="background:#fff;border-radius:20px;padding:10px">${qrSvg(inviteUrl(ME.code), 8).replace("<svg", '<svg style="width:260px;height:260px"')}<div style="font-size:18px;color:#1f1a2e">or scan to join</div></div></div>
     <div class="tvrow" style="justify-content:center;margin-top:30px">${scores || '<span class="muted">No players yet</span>'}</div>`;
   const d = deckOf(g);
-  const req = `<div class="request" style="padding:26px"><small style="font-size:16px">Round ${g.round} · ${esc(nameOf(g.judge))} is judging · Budget $${gBudget()}</small><b style="font-size:38px">${esc(g.request)}</b></div>`;
+  const req = `<div class="request" style="padding:26px"><small style="font-size:16px">Round ${g.round} · ${judgeLine(g)} · Budget $${gBudget()}</small><b style="font-size:38px">${esc(g.request)}</b></div>`;
   if(t && !t.done && t.live) return liveTV(g, d, top, req);
   if(t && !t.done && t.auction){
     const chips = g.order.map(id => `<div class="tvchip ${bidsOf(id).length > t.stop ? '' : 'now'}">${esc(nameOf(id))} ${bidsOf(id).length > t.stop ? '✅' : '⏳'}</div>`).join("");
@@ -1444,7 +1445,7 @@ function tvView(){
   }
   const ch = awardTally("chaos"), wd = awardTally("worst");
   const awardLine = g.order.filter(id => ch[id] || wd[id]).map(id => `<div class="tvchip">${esc(nameOf(id))} ${ch[id]?`🌪️ ${ch[id]}`:""} ${wd[id]?`💸 ${wd[id]}`:""}</div>`).join("");
-  return top + animWrap(`tvwin|${g.round}`, "a-stamp", `<div class="tvbig center" style="margin-top:40px">🏆 ${esc(nameOf(g.winner))} wins round ${g.round}!</div>`, 450) + `
+  return top + animWrap(`tvwin|${g.round}`, "a-stamp", `<div class="tvbig center" style="margin-top:40px">${g.winner ? `🏆 ${esc(nameOf(g.winner))} wins round ${g.round}!` : `🤝 Round ${g.round} is a tie!`}</div>`, 450) + `
     <h2 style="font-size:28px">Scores</h2><div class="tvrow">${scores}</div>
     ${awardLine ? `<h2 style="font-size:28px">Bonus award votes</h2><div class="tvrow">${awardLine}</div>` : ""}`;
 }
@@ -1842,7 +1843,18 @@ function onRoomChange(){
   // host: tally the judge's vote
   if(iAmHost()){
     const G = myPres.game;
-    if(G.round && G.scoredRound !== G.round){
+    if(G.round && G.scoredRound !== G.round && !G.judge){
+      const vs = G.order.map(id => presOf(id)).map(p => p && p.vote && p.vote.round === G.round ? p.vote.peer : null);
+      if(vs.length && vs.every(v => v && G.order.includes(v))){
+        const agree = vs.every(v => v === vs[0]), w = agree ? vs[0] : null;
+        const scores = Object.assign({}, G.scores), wins = Object.assign({}, G.wins);
+        if(w){ scores[w] = (scores[w]||0) + 1; wins[w] = (wins[w]||0) + 1; }
+        const history = (G.history || []).concat([{r: G.round, q: G.request, w: w ? nameOf(w) : "Tie", d: deckOf(G).name}]).slice(-8);
+        setPres({game: Object.assign({}, G, {scores, wins, history, scoredRound:G.round, winner:w, tie:!w})});
+        return;
+      }
+    }
+    if(G.round && G.scoredRound !== G.round && G.judge){
       const jp = presOf(G.judge);
       if(jp && jp.vote && jp.vote.round === G.round && G.order.includes(jp.vote.peer)){
         const scores = Object.assign({}, G.scores); scores[jp.vote.peer] = (scores[jp.vote.peer]||0) + 1;
@@ -1892,17 +1904,18 @@ function hostStartRound(){
     const k = best[Math.floor(Math.random()*best.length)];
     G = Object.assign({}, G, {deck: k, src: k, cd: null, voteDecks: null});
   }
-  if(ids.length < 2){ roomErr = "You need at least 2 people (1 judge + 1 builder)."; render(); return; }
+  if(ids.length < 2){ roomErr = "You need at least 2 people."; render(); return; }
   let judge;
-  if(!G.round) judge = me;
+  if(ids.length === 2) judge = null;            // only 2 players: head to head, no judge
+  else if(!G.round || !G.judge) judge = me;
   else { const i = ids.indexOf(G.judge); judge = ids[(i + 1 + ids.length) % ids.length]; }
-  const order = ids.filter(id => id !== judge).slice(0, 10);
+  const order = ids.filter(id => id !== judge).slice(0, 11);
   // rotate who drafts first each round
   const shift = G.round % order.length; const ord = order.slice(shift).concat(order.slice(0, shift));
   const req = `Build ${reqName(deckOf(G))} for ${REQUESTS[Math.floor(Math.random()*REQUESTS.length)]}`;
   roomErr = "";
   const live = G.mode === "live" ? {s:0, lot:0, high:0, by:null, ends:Date.now() + 12000, lots: liveLots(ord.length, `${ME.code}|${G.round+1}|lots`), won:[]} : null;
-  setPres({game: Object.assign({}, G, {judge, order:ord, round:G.round+1, request:req, winner:null, budget:(G.mode === "live" ? budgetFor(ord.length) + 6 : budgetFor(ord.length)), live})});
+  setPres({game: Object.assign({}, G, {judge, order:ord, round:G.round+1, request:req, winner:null, tie:false, budget:(G.mode === "live" ? budgetFor(ord.length) + 6 : budgetFor(ord.length)), live})});
   onRoomChange();
 }
 function hostSetTimer(v){ SET.timer = v; lsSet("bb-timer", String(v)); setPres({game: Object.assign({}, myPres.game, {timer: v})}); }
@@ -2107,7 +2120,7 @@ function onlinePick(tok, now){
   else if(tok === "l"){ pick = {t:0,l:true}; }
   else { const o = myOptions(t.stop).find(x => x.t === tok); if(!o || !o.ok) return; priceSound(tok); pick = {t:tok}; }
   if(now){ setPres({picks: myPres.picks.concat([pick])}); return; }
-  pendingPick = {pick, timer: setTimeout(commitPending, 3000)};
+  pendingPick = {pick, timer: setTimeout(commitPending, 1000)};
   render();
 }
 function onlineFlip(ci){
@@ -2164,7 +2177,7 @@ function online(){
   if(between){
     const cdk = (g.deck === "custom" && g.cd) ? g.cd : (iAmHost() ? DECKS.custom : null);
     const curD = deckOf(g);
-    const winBanner = g.winner ? animWrap(`win|${g.round}`, "a-stamp", `<div class="request"><small>Round ${g.round} winner</small><b>🏆 ${esc(nameOf(g.winner))}</b></div>`, 450) : "";
+    const winBanner = (!g.winner && g.tie && g.round) ? `<div class="request"><small>Round ${g.round}</small><b>🤝 Split vote, it's a tie</b></div>` : g.winner ? animWrap(`win|${g.round}`, "a-stamp", `<div class="request"><small>Round ${g.round} winner</small><b>🏆 ${esc(nameOf(g.winner))}</b></div>`, 450) : "";
     const la = g.lastAwards && (g.lastAwards.chaos.length || g.lastAwards.worst.length) ? `<p class="muted center">Round ${g.lastAwards.round} bonus: ${g.lastAwards.chaos.map(id=>"🌪️ "+esc(nameOf(id))).concat(g.lastAwards.worst.map(id=>"💸 "+esc(nameOf(id)))).join(" · ")} (+1 each)</p>` : "";
     const tvs = peersNow().filter(p => p.presence.tv).length;
     return head + winBanner + (g.round && g.awardedRound !== g.round ? awardsBox() : "") + la + `
@@ -2181,7 +2194,7 @@ function online(){
       ${roomErr ? `<p class="warn">${esc(roomErr)}</p>` : ""}`;
   }
 
-  const req = (hostLive() ? "" : `<p class="warn center">The host lost connection. The game will continue when they're back. Tell them to keep their screen on!</p>`) + `<div class="request"><small>Round ${g.round} · ${esc(nameOf(g.judge))} is judging · Budget $${gBudget()}</small><b>${esc(g.request)}</b></div>`;
+  const req = (hostLive() ? "" : `<p class="warn center">The host lost connection. The game will continue when they're back. Tell them to keep their screen on!</p>`) + `<div class="request"><small>Round ${g.round} · ${judgeLine(g)} · Budget $${gBudget()}</small><b>${esc(g.request)}</b></div>`;
   const inRound = g.order.includes(me);
   const d = deckOf(g);
 
@@ -2240,10 +2253,17 @@ function online(){
         ${f ? flipAnim(`on|${ME.code}|${g.round}|${id}|${ci}`, p.t, p.m, it.good, p.l, `<div class="n">${esc(it.text)}</div>${verdict}`) : (mineB ? `<button class="flip" onclick="onlineFlip(${ci})">Tap to flip</button>` : `<div class="n" style="color:var(--muted)">🂠 not flipped yet</div>`)}
         </div><span class="p">${hidePrice ? '🙈' : isLiveAuc(g) ? (p.m ? '❓ ' : '') + 'paid $' + p.bid : p.m?'❓':p.l?'🗑️':'$'+p.t}</span></div>`;
     }).join("");
-    const voteBtn = (me === g.judge) ? `<button class="btn alt" style="margin:6px 0 10px" onclick="judgeVote('${id}')">🏆 ${esc(blindName(g, id))} wins</button>` : "";
+    const myVote = myPres.vote && myPres.vote.round === g.round ? myPres.vote.peer : null;
+    const voteBtn = (me === g.judge) ? `<button class="btn alt" style="margin:6px 0 10px" onclick="judgeVote('${id}')">🏆 ${esc(blindName(g, id))} wins</button>`
+      : (isH2H(g) && inRound && g.scoredRound !== g.round) ? `<button class="btn ${myVote===id?'':'alt'}" style="margin:6px 0 10px" onclick="judgeVote('${id}')">${myVote===id?'✅ Your vote: ':'🏆 '}${esc(nameOf(id))} wins</button>` : "";
     return `<h2>${esc(blindName(g, id))}${!blind && mineB?' (you)':''}${hidePrice ? '' : ' · $' + total}</h2><div class="reveal">${rows}</div>${voteBtn}`;
   }).join("");
-  const voted = presOf(g.judge) && presOf(g.judge).vote && presOf(g.judge).vote.round === g.round;
+  const voted = !isH2H(g) && presOf(g.judge) && presOf(g.judge).vote && presOf(g.judge).vote.round === g.round;
+  const h2hVotes = isH2H(g) ? g.order.filter(id => { const p = presOf(id); return p && p.vote && p.vote.round === g.round; }).length : 0;
+  if(isH2H(g)){
+    const note2 = `<p class="muted center">⚔️ Head to head: flip your picks, make your case, then you both vote. If you agree, that build gets the point. If you split, it's a tie. ${h2hVotes ? `(${h2hVotes}/2 voted)` : ""}</p>`;
+    return head + req + note2 + reactBar() + builds;
+  }
   const note = me === g.judge ? `<p class="muted center">${blind ? "🙈 Blind judging: you don't know whose build is whose. Pick the best one!" : "Have each player flip their picks and pitch them, then tap the winner."}</p>`
     : `<p class="muted center">${inRound ? "Flip your picks one at a time and sell it to the judge!" : ""}</p>`;
   return head + req + note + reactBar() + builds + (voted ? `<p class="muted center">Judge has voted. Waiting for the host…</p>` : "");
@@ -2316,7 +2336,9 @@ function modePicker(g){
     <button class="opt ${g.blind ? "sel" : ""}" style="margin:0" onclick="setBlind()"><span class="p">${g.blind ? "ON" : "OFF"}</span>🙈 Blind judging: the judge sees "Build A, B, C" instead of names</button></div>`;
 }
 // Blind judging: hide names (and prices) from the reveal until the judge decides
-function blindOn(g){ return g && g.blind && g.scoredRound !== g.round; }
+function blindOn(g){ return g && g.judge && g.blind && g.scoredRound !== g.round; }
+function isH2H(g){ return !!(g && g.round && !g.judge); }
+function judgeLine(g){ return isH2H(g) ? "⚔️ Head to head" : esc(nameOf(g.judge)) + " is judging"; }
 function blindLabel(g, id){
   const ids = g.order.slice().sort((a, b) => hashNum(`${ME.code}|${g.round}|blind|${a}`) - hashNum(`${ME.code}|${g.round}|blind|${b}`));
   return "Build " + "ABCDEFGHIJ"[ids.indexOf(id)];
@@ -2593,7 +2615,7 @@ function pendingBox(){
   if(!pendingPick) return "";
   const p = pendingPick.pick, label = p.m ? "❓ Mystery" : p.l ? "🗑️ Leftovers" : "$" + p.t;
   return `<div class="cat center" style="border-color:var(--pop)"><b>Locking in ${label}…</b>
-    <button class="btn ghost" style="margin-top:8px" onclick="undoPending()">↩️ Undo</button></div>`;
+    <div style="display:flex;gap:8px;margin-top:8px"><button class="btn ghost" onclick="undoPending()">↩️ Undo</button><button class="btn" onclick="commitPending()">✅ Lock in</button></div></div>`;
 }
 
 /* ---- Your-turn buzz ---- */
