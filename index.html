@@ -1078,7 +1078,7 @@ function home(){
   <h2>Game setup</h2>
   ${timerSlider(state.timer, "setSoloTimer")}
   ${displayRow()}
-  <div style="height:${state.request ? 90 : 40}px"></div>
+  <div style="height:${state.request ? 150 : 100}px"></div>
   ${startBar()}
   `;
 }
@@ -1091,6 +1091,7 @@ function startBar(){
     <div class="barline"><span style="font-size:17px">${esc(d.emoji)} ${esc(d.name)}</span>
       <button class="btn ghost" style="width:auto;padding:6px 12px;font-size:14px" onclick="drawRequest()">${state.request ? "🔄 New request" : "🎤 Draw a request"}</button></div>
     ${state.request ? animWrap("req|" + state.request, "a-pop", `<p style="margin:6px 0 2px;font-weight:700">${esc(state.request)}</p>`, 400) : ""}
+    ${writeReqRow("useMyReqSolo()")}
     <button class="btn alt" style="margin-top:8px" onclick="ac();state.seed=Date.now();state.screen='build';state.picks={};state.flipped={};render();scrollTo(0,0)">Start building</button>
   </div></div>`;
 }
@@ -1120,14 +1121,15 @@ function build(){
   const s = spent(), over = s > BUDGET, count = Object.keys(state.picks).length, total = d.cats.length;
   const toks = [10,9,8,7,6,5,4,3,2,1].map(t=>`<div class="tok ${used.has(t)?'gone':''}">${t}</div>`).join("");
   return `
-    <div class="barline"><button class="btn ghost" style="width:auto;padding:8px 14px;font-size:14px" onclick="state.screen='home';state.picks={};render()">← Decks</button>${soundBtn()}</div>
+    <div class="barline"><button class="btn ghost" style="width:auto;padding:8px 14px;font-size:14px" onclick="buildBack()">${state.pp ? "← Back" : "← Decks"}</button>${soundBtn()}</div>
+    ${state.pp ? `<p class="muted center" style="margin:0 0 6px">🙈 ${esc(state.pp.players[ppBuilders()[state.pp.turn]])} is building</p>` : ""}
     ${state.request ? `<div class="request"><small>Judge's request</small><b>${esc(state.request)}</b></div>` : `<h2>${esc(d.emoji)} ${esc(d.name)}</h2>`}
     ${cats}
     <div class="bar"><div class="in">
       <div class="barline"><span>$${s} / $${BUDGET} · ${count}/${total} picks</span><div class="tokens">${toks}</div></div>
       <div class="meter ${over?'over':''}"><i style="width:${Math.min(100,s/BUDGET*100)}%"></i></div>
       ${over ? `<p class="warn">Over budget by $${s-BUDGET}! Swap something cheaper.</p>` : ""}
-      <button class="btn alt" ${count<total||over?'disabled':''} onclick="state.screen='reveal';render();scrollTo(0,0)">${count<total ? `Pick ${total-count} more` : "🔒 Lock in my build"}</button>
+      <button class="btn alt" ${count<total||over?'disabled':''} onclick="lockBuild()">${count<total ? `Pick ${total-count} more` : "🔒 Lock in my build"}</button>
     </div></div>`;
 }
 
@@ -1138,6 +1140,27 @@ function flip(ci){
   render();
 }
 
+let _flipAllRun = false;
+// Flip every unflipped card one after another, top to bottom.
+function flipAll(online){
+  if(_flipAllRun) return; _flipAllRun = true;
+  const n = online ? picksOf(myId()).length : soloDeck().cats.length;
+  const todo = [];
+  for(let i = 0; i < n; i++){ if(!(online ? myPres.flipped[i] : state.flipped[i])) todo.push(i); }
+  todo.forEach((ci, k) => setTimeout(() => {
+    online ? onlineFlip(ci) : flip(ci);
+    const el = online ? null : document.querySelectorAll(".rv")[ci]; if(el && el.scrollIntoView) el.scrollIntoView({behavior:"smooth", block:"center"});
+    if(k === todo.length - 1) _flipAllRun = false;
+  }, k * 700));
+  if(!todo.length) _flipAllRun = false;
+  render();
+}
+function flipAllBtn(online){
+  const n = online ? picksOf(myId()).length : soloDeck().cats.length;
+  let left = 0; for(let i = 0; i < n; i++) if(!(online ? myPres.flipped[i] : state.flipped[i])) left++;
+  if(!left) return "";
+  return `<button class="btn" style="margin:6px 0 10px" ${_flipAllRun ? "disabled" : ""} onclick="flipAll(${online})">${_flipAllRun ? "Revealing…" : "🃏 Reveal all " + left}</button>`;
+}
 function reveal(){
   const d = soloDeck();
   const rows = d.cats.map((c,ci) => {
@@ -1152,7 +1175,7 @@ function reveal(){
     <div class="barline"><h1>Your <span>Build</span></h1>${soundBtn()}</div>
     ${state.request ? `<div class="request"><small>Judge's request</small><b>${esc(state.request)}</b></div>` : ""}
     <p class="muted center">Show the judge your screen and flip each pick one at a time.</p>
-    <div class="reveal">${rows}</div>
+    ${flipAllBtn(false)}<div class="reveal">${rows}</div>
     <div class="total">Spent $${spent()} of $${BUDGET}</div>
     <button class="btn ghost" style="margin-bottom:10px" onclick="soloCard()">📸 Make a share card</button>
     <div class="row">
@@ -1864,6 +1887,14 @@ function onRoomChange(){
         return;
       }
     }
+    // judge wrote their own request
+    if(G.round && G.judge && G.scoredRound !== G.round){
+      const jp = presOf(G.judge), mr = jp && jp.myReq;
+      if(mr && mr.round === G.round && mr.at !== G.reqAt && cleanReq(mr.text)){
+        setPres({game: Object.assign({}, G, {request: cleanReq(mr.text), reqAt: mr.at})});
+        return;
+      }
+    }
     // judge asked for a new request
     if(G.round && G.rerolled !== G.round){
       const jp = presOf(G.judge);
@@ -2151,7 +2182,9 @@ function menu(){
   <h2>📱 Play online</h2>
   <div class="cat">${onlineBox}</div>
   <h2>🤝 One phone</h2>
-  <button class="btn ghost" onclick="state.screen='home';render()">Play on this phone</button>
+  <button class="btn alt" onclick="ppOpen()">📱 Pass and play</button>
+  <p class="muted" style="margin:6px 0 10px;font-size:13px">One phone passed around the table. Everyone builds in secret, then the judge picks.</p>
+  <button class="btn ghost" onclick="state.pp=null;state.screen='home';render()">Just me: build on this phone</button>
   <h2>⚙️ Display</h2>${displayRow()}
   <details class="cat" style="margin-top:12px"><summary>🎧 Hear the sounds</summary>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">${[["pick","Pick"],["spin","Mystery"],["flip","Flip"],["great","Great"],["good","Good"],["bad","Bad"],["turn","Your turn"],["win","Winner"],["timeup","Time's up"],["pop","Reaction"]].map(([k,l]) => `<button class="opt" style="width:auto;margin:0;font-size:14px" onclick="ac();sfx('${k}')">${l}</button>`).join("")}</div></details>`;
@@ -2200,14 +2233,14 @@ function online(){
 
   // Live auction phase
   if(t && !t.done && t.live){
-    return head + req + liveBody(g, d, inRound) + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Enjoy the bidding war!" : "You'll join next round."}</p>`) + (inRound ? liveBar(g, d) : "");
+    return head + req + liveBody(g, d, inRound) + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Enjoy the bidding war!" : "You'll join next round."}</p>`) + writeReqBox(g) + (inRound ? liveBar(g, d) : "");
   }
   // Auction phase
   if(t && !t.done && t.auction){
     const mine = inRound ? `<div class="bar"><div class="in"><div class="barline"><span>Your bids: $${myBidSpent()} / $${gBudget()}</span><span>${(myPres.bids||[]).map(b => b.m ? "❓" : "$" + b.b).join(" · ") || "No bids yet"}</span></div></div></div>` : "";
     const canReroll = me === g.judge && g.rerolled !== g.round && !(myPres.reroll === g.round);
     const rerollBtn = me === g.judge ? (canReroll ? `<button class="btn ghost" style="margin-top:6px" onclick="askReroll()">🎲 New request (1 per round)</button>` : "") : "";
-    return head + req + auctionBody(g, t, d, inRound) + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Sit back while they bid." : "You'll join next round."}</p>`) + rerollBtn + mine;
+    return head + req + auctionBody(g, t, d, inRound) + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Sit back while they bid." : "You'll join next round."}</p>`) + rerollBtn + writeReqBox(g) + mine;
   }
   // Draft phase
   if(t && !t.done){
@@ -2238,7 +2271,7 @@ function online(){
       <p class="muted" style="margin:6px 0 0">${myPres.picks.map((p,i)=>`${d.cats[i].n.split(" ")[0]} ${p.m?'❓':p.l?'🗑️':'$'+p.t}`).join(" · ") || "No picks yet"}</p></div></div>` : "";
     const canReroll = me === g.judge && g.rerolled !== g.round && !(myPres.reroll === g.round);
     const rerollBtn = me === g.judge ? (canReroll ? `<button class="btn ghost" style="margin-top:6px" onclick="askReroll()">🎲 New request (1 per round)</button>` : `<p class="muted center">Request reroll used.</p>`) : "";
-    return head + req + body + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Sit back while they draft." : "You'll join next round."}</p>`) + rerollBtn + mine;
+    return head + req + body + (inRound ? "" : `<p class="muted center">${me===g.judge ? "You're the judge. Sit back while they draft." : "You'll join next round."}</p>`) + rerollBtn + writeReqBox(g) + mine;
   }
 
   // Reveal phase
@@ -2256,7 +2289,7 @@ function online(){
     const myVote = myPres.vote && myPres.vote.round === g.round ? myPres.vote.peer : null;
     const voteBtn = (me === g.judge) ? `<button class="btn alt" style="margin:6px 0 10px" onclick="judgeVote('${id}')">🏆 ${esc(blindName(g, id))} wins</button>`
       : (isH2H(g) && inRound && g.scoredRound !== g.round) ? `<button class="btn ${myVote===id?'':'alt'}" style="margin:6px 0 10px" onclick="judgeVote('${id}')">${myVote===id?'✅ Your vote: ':'🏆 '}${esc(nameOf(id))} wins</button>` : "";
-    return `<h2>${esc(blindName(g, id))}${!blind && mineB?' (you)':''}${hidePrice ? '' : ' · $' + total}</h2><div class="reveal">${rows}</div>${voteBtn}`;
+    return `<h2>${esc(blindName(g, id))}${!blind && mineB?' (you)':''}${hidePrice ? '' : ' · $' + total}</h2>${mineB && !isLiveAuc(g) ? flipAllBtn(true) : ""}<div class="reveal">${rows}</div>${voteBtn}`;
   }).join("");
   const voted = !isH2H(g) && presOf(g.judge) && presOf(g.judge).vote && presOf(g.judge).vote.round === g.round;
   const h2hVotes = isH2H(g) ? g.order.filter(id => { const p = presOf(id); return p && p.vote && p.vote.round === g.round; }).length : 0;
@@ -2717,21 +2750,217 @@ function hostPlayAgain(){
   setPres({game: Object.assign({}, G, {scores: {}, wins: {}, awardCount: {}, history: [], champion: null, lastAwards: null, winner: null, gameNo: (G.gameNo || 0) + 1, scoredRound: G.round, awardedRound: G.round})});
 }
 
+/* ================= JUDGE WRITES THE REQUEST ================= */
+function cleanReq(t){ return String(t || "").replace(/\s+/g, " ").trim().slice(0, 140); }
+function useMyReqSolo(){
+  const el = document.getElementById("rq"), t = cleanReq(el && el.value);
+  if(!t) return; state.request = t; if(el) el.value = ""; sfx("pop"); render();
+}
+function writeReqRow(onclick, ph){
+  return `<div class="row" style="margin-top:8px"><input id="rq" class="inp" maxlength="140" placeholder="${ph || "Or write your own request"}" style="margin:0;flex:1 1 auto;min-width:0" onkeydown="if(event.key==='Enter'){${onclick}}"><button class="btn ghost" style="width:auto;flex:0 0 auto;padding:8px 14px" onclick="${onclick}">✏️ Use</button></div>`;
+}
+// Online: the judge can type their own request during the round
+function sendMyReq(){
+  const g = game(), el = document.getElementById("rq"), t = cleanReq(el && el.value);
+  if(!g || !t) return; if(el) el.value = "";
+  setPres({myReq: {round: g.round, text: t, at: Date.now()}}); sfx("pop"); onRoomChange();
+}
+function writeReqBox(g){
+  if(!g || myId() !== g.judge) return "";
+  return `<div class="cat"><b>✏️ Write your own request</b><p class="muted" style="margin:4px 0 0">Type it like "a pizza for Pastor Mike" and it replaces the current one for everyone.</p>${writeReqRow("sendMyReq()", "Build something for…")}</div>`;
+}
+
+/* ================= PASS AND PLAY (one phone, many players) ================= */
+function ppOpen(){
+  state.pp = state.pp || {players: [], scores: {}, round: 0, judge: -1, phase: "setup", target: 5};
+  state.pp.phase = state.pp.round ? state.pp.phase : "setup";
+  state.screen = "pp"; render(true); scrollTo(0, 0);
+}
+function ppQuit(){ state.pp = null; state.picks = {}; state.flipped = {}; state.request = null; state.screen = "menu"; render(true); scrollTo(0,0); }
+function ppAdd(){
+  const el = document.getElementById("pn"), n = String(el && el.value || "").trim().slice(0, 16);
+  const P = state.pp; if(!n || P.players.length >= 8) return;
+  if(P.players.some(x => x.toLowerCase() === n.toLowerCase())){ if(el) el.value = ""; return; }
+  P.players.push(n); if(el) el.value = ""; sfx("pick"); render(true);
+  setTimeout(() => { const e = document.getElementById("pn"); if(e) e.focus(); }, 0);
+}
+function ppRemove(i){ const P = state.pp; const n = P.players[i]; P.players.splice(i, 1); delete P.scores[n]; render(true); }
+function ppSetTarget(v){ state.pp.target = +v; }
+function ppBuilders(){ const P = state.pp; return P.players.map((n, i) => i).filter(i => i !== P.judge); }
+function ppNewRound(){
+  const P = state.pp; if(!state.deck || !DECKS[state.deck] || P.players.length < 2) return;
+  P.round++; const n = P.players.length;
+  P.judge = n === 2 ? -1 : (P.judge + 1 + n) % n;
+  P.builds = {}; P.turn = 0; P.winner = null; P.tie = false; P.request = null;
+  state.request = null;
+  if(P.judge < 0){ drawRequestPP(); P.phase = "handoff"; } else P.phase = "request";
+  ac(); render(true); scrollTo(0, 0);
+}
+function drawRequestPP(){
+  const d = DECKS[state.deck];
+  state.pp.request = `Build ${reqName(d)} for ${REQUESTS[Math.floor(Math.random()*REQUESTS.length)]}`;
+  sfx("pop"); render(true);
+}
+function ppWriteReq(){
+  const el = document.getElementById("rq"), t = cleanReq(el && el.value);
+  if(!t) return; state.pp.request = t; if(el) el.value = ""; sfx("pop"); render(true);
+}
+function ppStartBuild(){
+  const P = state.pp, b = ppBuilders()[P.turn];
+  state.seed = Date.now() + b * 7919; state.picks = {}; state.flipped = {}; state.undo = null;
+  state.request = P.request; state.screen = "build"; turnKey = ""; render(true); scrollTo(0, 0);
+}
+function lockBuild(){
+  const P = state.pp;
+  if(!P){ state.screen = "reveal"; render(); scrollTo(0,0); return; }
+  const b = ppBuilders()[P.turn];
+  P.builds[b] = {picks: Object.assign({}, state.picks), seed: state.seed, flipped: {}};
+  state.picks = {}; state.flipped = {};
+  P.turn++; P.phase = P.turn < ppBuilders().length ? "handoff" : "gather";
+  state.screen = "pp"; sfx("gavel"); render(true); scrollTo(0, 0);
+}
+function buildBack(){
+  if(state.pp){ state.picks = {}; state.flipped = {}; state.screen = "pp"; render(true); return; }
+  state.screen = 'home'; state.picks = {}; render();
+}
+function ppFlip(b, ci){
+  const B = state.pp.builds[b]; if(!B || B.flipped[ci]) return;
+  B.flipped[ci] = true; sfx("flip");
+  const p = B.picks[ci]; setTimeout(() => resultSound(p.token, p.myst, p.good, p.left), 120);
+  render(true);
+}
+let _ppFlipRun = false;
+function ppFlipAll(b){
+  if(_ppFlipRun) return; const B = state.pp.builds[b]; if(!B) return;
+  const todo = Object.keys(B.picks).map(Number).sort((x, y) => x - y).filter(ci => !B.flipped[ci]);
+  if(!todo.length) return; _ppFlipRun = true;
+  todo.forEach((ci, k) => setTimeout(() => {
+    ppFlip(b, ci);
+    const el = document.getElementById(`pp${b}-${ci}`); if(el && el.scrollIntoView) el.scrollIntoView({behavior:"smooth", block:"center"});
+    if(k === todo.length - 1){ _ppFlipRun = false; render(true); }
+  }, k * 700));
+  render(true);
+}
+function ppWin(b){
+  const P = state.pp;
+  if(b === null){ P.tie = true; P.winner = null; }
+  else { const n = P.players[b]; P.winner = n; P.scores[n] = (P.scores[n] || 0) + 1; sfx("win"); confetti(70); }
+  P.phase = "results"; render(true); scrollTo(0, 0);
+}
+function ppNewGame(){ const P = state.pp; P.scores = {}; P.round = 0; P.judge = -1; P.phase = "setup"; render(true); scrollTo(0,0); }
+
+function ppScoreRows(){
+  const P = state.pp;
+  return P.players.map(n => ({n, s: P.scores[n] || 0})).sort((a, b) => b.s - a.s)
+    .map(x => `<div class="rv"><div class="n">${esc(x.n)}</div><span class="p">${x.s}</span></div>`).join("");
+}
+function ppScreen(){
+  const P = state.pp, d = state.deck && DECKS[state.deck];
+  const top = `<div class="barline"><button class="btn ghost" style="width:auto;padding:8px 14px;font-size:14px" onclick="ppQuit()">← Menu</button>${soundBtn()}</div>`;
+  const judgeName = P.judge >= 0 ? P.players[P.judge] : null;
+  const reqBox = P.request ? `<div class="request"><small>Round ${P.round} · ${judgeName ? esc(judgeName) + " is judging" : "⚔️ Head to head"}</small><b>${esc(P.request)}</b></div>` : "";
+
+  if(P.phase === "setup"){
+    const list = P.players.map((n, i) => `<div class="rv"><div class="n">${esc(n)}${P.scores[n] ? ` · ${P.scores[n]} pts` : ""}</div><button class="btn ghost" style="width:auto;padding:4px 10px;font-size:13px" onclick="ppRemove(${i})">✕</button></div>`).join("");
+    const ready = P.players.length >= 2 && d;
+    return top + `<h1>📱 Pass <span>and play</span></h1>
+      <p class="muted">One phone, passed around the table. Everyone builds in secret, then the judge picks a winner. With only 2 players it's head to head.</p>
+      <h2>Players (${P.players.length}/8)</h2>
+      <div class="cat">${list || `<p class="muted" style="margin:0">Add at least 2 players.</p>`}
+        ${P.players.length < 8 ? `<div class="row" style="margin-top:8px"><input id="pn" class="inp" maxlength="16" placeholder="Player name" style="margin:0;flex:1 1 auto;min-width:0" onkeydown="if(event.key==='Enter')ppAdd()"><button class="btn" style="width:auto;flex:0 0 auto;padding:8px 18px" onclick="ppAdd()">Add</button></div>` : ""}</div>
+      <h2>Pick a deck</h2>
+      ${deckPicker(state.deck, true, false, DECKS.custom)}
+      <h2>Game setup</h2>
+      ${timerSlider(state.timer, "setSoloTimer")}
+      <div class="cat"><b>🏁 First to <span id="ppt">${P.target}</span> points wins</b>
+        <input type="range" min="1" max="10" value="${P.target}" style="width:100%" oninput="ppSetTarget(this.value);document.getElementById('ppt').textContent=this.value"></div>
+      <div style="height:90px"></div>
+      <div class="bar"><div class="in">
+        <div class="barline"><span style="font-size:17px">${d ? esc(d.emoji) + " " + esc(d.name) : "Pick a deck"}</span><span class="muted">${P.players.length} players</span></div>
+        <button class="btn alt" style="margin-top:8px" ${ready ? "" : "disabled"} onclick="ppNewRound()">${P.round ? "▶️ Next round" : "▶️ Start game"}</button>
+      </div></div>`;
+  }
+  if(P.phase === "request"){
+    return top + `<div class="request"><small>Round ${P.round}</small><b>📱 Give the phone to ${esc(judgeName)}</b></div>
+      <p class="muted center">${esc(judgeName)}, you're the judge this round. Draw a request or write your own, then pass the phone on.</p>
+      ${P.request ? animWrap("ppreq|" + P.request, "a-pop", `<div class="request"><small>Your request</small><b>${esc(P.request)}</b></div>`, 400) : ""}
+      <div class="cat">
+        <button class="btn ghost" onclick="drawRequestPP()">${P.request ? "🔄 Draw a different one" : "🎤 Draw a request"}</button>
+        ${writeReqRow("ppWriteReq()", "Write your own…")}
+      </div>
+      <button class="btn alt" ${P.request ? "" : "disabled"} onclick="state.pp.phase='handoff';render(true);scrollTo(0,0)">Done, pass the phone</button>`;
+  }
+  if(P.phase === "handoff"){
+    const b = ppBuilders()[P.turn], name = P.players[b];
+    return top + reqBox + `<div class="cat center" style="padding:30px 16px">
+        <div style="font-size:54px">🙈</div>
+        <h2 style="margin:6px 0">Pass the phone to ${esc(name)}</h2>
+        <p class="muted">No peeking, everyone else. Builder ${P.turn + 1} of ${ppBuilders().length}.</p>
+        <button class="btn alt" style="margin-top:10px" onclick="ppStartBuild()">I'm ${esc(name)}, start my build</button>
+      </div>`;
+  }
+  if(P.phase === "gather"){
+    return top + reqBox + `<div class="cat center" style="padding:30px 16px">
+        <div style="font-size:54px">🎉</div>
+        <h2 style="margin:6px 0">Everyone's built!</h2>
+        <p class="muted">${judgeName ? `Give the phone to ${esc(judgeName)} and gather around for the reveal.` : "Put the phone in the middle for the reveal."}</p>
+        <button class="btn alt" style="margin-top:10px" onclick="state.pp.phase='reveal';render(true);scrollTo(0,0)">Start the reveal</button>
+      </div>`;
+  }
+  if(P.phase === "reveal"){
+    const builds = ppBuilders().map(b => {
+      const B = P.builds[b], dk = jitter(DECKS[state.deck], "solo|" + B.seed);
+      const total = Object.values(B.picks).reduce((t, p) => t + (p.myst ? 0 : p.token), 0);
+      const rows = dk.cats.map((c, ci) => {
+        const p = B.picks[ci]; if(!p) return "";
+        const f = B.flipped[ci];
+        const verdict = p.myst ? `<div class="verdict ${p.good?'g':'b'}">${p.good?'✅ Jackpot!':'❌ Yikes.'}</div>` : "";
+        return `<div class="rv" id="pp${b}-${ci}"><div><div class="c">${c.n}</div>
+          ${f ? flipAnim(`pp|${P.round}|${b}|${ci}`, p.token, p.myst, p.good, p.left, `<div class="n">${esc(p.text)}</div>${verdict}`) : `<button class="flip" onclick="ppFlip(${b},${ci})">Tap to flip</button>`}
+          </div><span class="p">${p.myst?'❓':p.left?'🗑️':'$'+p.token}</span></div>`;
+      }).join("");
+      const left = dk.cats.filter((c, ci) => B.picks[ci] && !B.flipped[ci]).length;
+      const all = left ? `<button class="btn" style="margin:6px 0 10px" ${_ppFlipRun ? "disabled" : ""} onclick="ppFlipAll(${b})">${_ppFlipRun ? "Revealing…" : "🃏 Reveal all " + left}</button>` : "";
+      return `<h2>${esc(P.players[b])} · $${total}</h2>${all}<div class="reveal">${rows}</div>
+        <button class="btn alt" style="margin:6px 0 14px" onclick="ppWin(${b})">🏆 ${esc(P.players[b])} wins</button>`;
+    }).join("");
+    const note = judgeName ? `${esc(judgeName)}: have each builder flip their cards and pitch their build, then tap the winner.` : "Flip both builds, argue it out, then tap the winner together.";
+    return top + reqBox + `<p class="muted center">${note}</p>` + builds + (judgeName ? "" : `<button class="btn ghost" onclick="ppWin(null)">🤝 Call it a tie</button>`);
+  }
+  if(P.phase === "results"){
+    const max = Math.max(0, ...Object.values(P.scores)), champ = max >= P.target ? P.players.filter(n => (P.scores[n] || 0) === max) : [];
+    if(champ.length){
+      if(P._champFx !== P.round){ P._champFx = P.round; setTimeout(() => { confetti(140); setTimeout(() => confetti(100), 700); }, 50); }
+      return top + animWrap("ppchamp|" + P.round, "a-stamp", `<div class="request"><small>Champion</small><b>👑 ${champ.map(esc).join(" & ")}</b></div>`, 450)
+        + `<h2>Final scores</h2><div class="reveal">${ppScoreRows()}</div>
+        <button class="btn alt" onclick="ppNewGame()">🔁 New game, same players</button>
+        <button class="btn ghost" style="margin-top:10px" onclick="ppQuit()">Back to menu</button>`;
+    }
+    const n = P.players.length, nextJudge = n === 2 ? null : P.players[(P.judge + 1 + n) % n];
+    const banner = P.winner ? animWrap("ppwin|" + P.round, "a-stamp", `<div class="request"><small>Round ${P.round} winner</small><b>🏆 ${esc(P.winner)}</b></div>`, 450)
+      : `<div class="request"><small>Round ${P.round}</small><b>🤝 It's a tie</b></div>`;
+    return top + banner + `<h2>Scores · first to ${P.target}</h2><div class="reveal">${ppScoreRows()}</div>
+      <button class="btn alt" onclick="ppNewRound()">▶️ Next round${nextJudge ? ` (${esc(nextJudge)} judges)` : ""}</button>
+      <button class="btn ghost" style="margin-top:10px" onclick="state.pp.phase='setup';render(true);scrollTo(0,0)">🃏 Change deck or players</button>`;
+  }
+  return top;
+}
+
 function render(force){
   const app = document.getElementById("app");
   if((state.screen === "editor" || state.screen === "browse") && !force && document.getElementById("app").innerHTML) return;
   const a = document.activeElement, keep = a && a.id ? {id:a.id, v:a.value} : null;
-  const vals = {nm: document.getElementById("nm")?.value, cd: document.getElementById("cd")?.value, th: document.getElementById("th")?.value, ht: document.getElementById("ht")?.value};
+  const vals = {nm: document.getElementById("nm")?.value, cd: document.getElementById("cd")?.value, th: document.getElementById("th")?.value, ht: document.getElementById("ht")?.value, rq: document.getElementById("rq")?.value, pn: document.getElementById("pn")?.value};
   lsSet("bb-tab", state.tab); lsSet("bb-sport", state.sport);
   applyDisplay();
   trackTurn();
   document.body.classList.toggle("tv", !!(state.screen === "online" && ME && ME.tv));
   const shelfScroll = {}; document.querySelectorAll(".shelf").forEach(el => { shelfScroll[el.dataset.aisle] = el.scrollLeft; });
-  app.innerHTML = state.screen==="browse" ? browseScreen() : state.screen==="editor" ? editorScreen() : state.screen==="menu" ? menu() : state.screen==="online" ? online() : state.screen==="home" ? home() : state.screen==="build" ? build() : reveal();
+  app.innerHTML = state.screen==="browse" ? browseScreen() : state.screen==="editor" ? editorScreen() : state.screen==="menu" ? menu() : state.screen==="pp" && state.pp ? ppScreen() : state.screen==="online" ? online() : state.screen==="home" ? home() : state.screen==="build" ? build() : reveal();
   app.innerHTML += cardOverlay() + inviteOverlay();
   screenAnim(app);
   document.querySelectorAll(".shelf").forEach(el => { if(shelfScroll[el.dataset.aisle]) el.scrollLeft = shelfScroll[el.dataset.aisle]; });
-  ["nm","cd","th","ht"].forEach(k => { const el = document.getElementById(k); if(el && vals[k] != null) el.value = vals[k]; });
+  ["nm","cd","th","ht","rq","pn"].forEach(k => { const el = document.getElementById(k); if(el && vals[k] != null) el.value = vals[k]; });
   if(keep){ const el = document.getElementById(keep.id); if(el){ el.focus(); } }
 }
 render();
