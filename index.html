@@ -1971,25 +1971,44 @@ let SAMPLE = null, genBusy = false, genMsg = "";
     const info = r.ok ? await r.json() : null;
     if(info && info.ai){
       AI_NEEDS_PASSWORD = !!info.password;
-      SAMPLE = {json: async (params) => {
+      // One small request to the AI helper. Each call is short so it never hits the time limit.
+      const ask = async (params) => {
         const res = await fetch("/.netlify/functions/make-deck", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(Object.assign({password: lsGet("bb-aipw")}, params))});
         if(res.status === 429) throw {code:"rate_limited"};
         if(res.status === 401) throw {code:"password"};
         const text = await res.text().catch(() => "");
-        if(!res.ok){
-          let info = {}; try { info = JSON.parse(text); } catch(e){}
-          throw {code: "failed", status: info.status || res.status, why: info.why || ""};
+        let out = {}; try { out = JSON.parse(text); } catch(e){}
+        if(!res.ok || !out.deck) throw {code: "failed", status: out.status || res.status, why: out.why || ""};
+        return out.deck;
+      };
+      // Retry a stop once if it comes back broken
+      const askTwice = (params) => ask(params).catch(e => (e && (e.code === "rate_limited" || e.code === "password" || e.status === 401 || e.why)) ? Promise.reject(e) : ask(params));
+      SAMPLE = {json: async (params) => {
+        if(params.type === "theme"){
+          const plan = await askTwice({type: "plan", theme: params.theme});
+          const names = (Array.isArray(plan.cats) ? plan.cats : []).map(x => typeof x === "string" ? x : (x && x.n) || "").filter(Boolean).slice(0, 5);
+          if(names.length < 5) throw {code: "failed", status: "plan"};
+          genMsg = `✨ Writing ${names.join(", ")}…`; render();
+          const cats = await Promise.all(names.map(n => askTwice({type: "cat", theme: params.theme, cat: n}).then(c => Object.assign({}, c, {n}))));
+          return {name: plan.name || params.theme, emoji: plan.emoji || "✨", cats};
         }
-        if(text.includes("[[ERROR]]")) throw {code: "failed", status: "stream"};
-        const m = text.match(/\{[\s\S]*\}/);
-        if(!m) throw {code: "failed", status: "empty"};
-        try { return JSON.parse(m[0]); } catch(e){ throw {code: "failed", status: "json"}; }
+        if(params.type === "home"){
+          const pos = HOME_POS[params.sport] || [];
+          const cats = await Promise.all(pos.map((n, i) => askTwice({type: "homecat", team: params.team, sport: params.sport, era: params.era, pos: i}).then(c => Object.assign({}, c, {n}))));
+          return {name: params.team, emoji: params.emoji || "🏟️", cats};
+        }
+        throw {code: "failed"};
       }};
     }
   } catch(e){ SAMPLE = null; }
   setTimeout(() => render(), 0);
 })();
 let AI_NEEDS_PASSWORD = false;
+const HOME_POS = {
+  NBA: ["🏀 Point Guard", "🎯 Shooting Guard", "🦅 Small Forward", "💪 Power Forward", "🗼 Center"],
+  NFL: ["🎯 Quarterback", "🏃 Running Back", "🙌 Wide Receiver", "🧲 Tight End", "🛡️ Defense"],
+  MLB: ["🔥 Ace Pitcher", "🧤 Catcher", "⚾ Infielder", "🏃 Outfielder", "💥 Slugger"]
+};
 function aiPasswordBox(){
   if(!AI_NEEDS_PASSWORD) return "";
   return `<input class="inp" type="password" placeholder="AI password (ask the host)" value="${esc(lsGet("bb-aipw"))}" onchange="lsSet('bb-aipw', this.value)">`;
@@ -2034,6 +2053,7 @@ async function runGen(prompt, theme, forOnline, extra){
       : e && (e.why === "model" || e.status === 404) ? `The AI model setting looks wrong (error ${e.status}). Check ANTHROPIC_MODEL in Netlify, or delete it to use the default.`
       : e && (e.status === 529 || e.status === 503) ? "The AI is busy right now. Try again in a minute."
       : e && e.status === 402 ? "The AI account is out of credits. Add credits at console.anthropic.com."
+      : e && e.status === "too_long" ? "The AI ran out of room writing that one. Try again."
       : `Couldn't make that deck${e && e.status ? ` (error ${e.status})` : ""}. Try again or try a different theme.`;
   }
   genBusy = false; render();
